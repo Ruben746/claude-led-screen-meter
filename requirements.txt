@@ -1,0 +1,5 @@
+pypixelcolor
+pillow
+requests
+aiohttp
+python-dotenv

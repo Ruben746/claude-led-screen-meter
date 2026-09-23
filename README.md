@@ -1,0 +1,163 @@
+# Claude meter
+
+[Français](#français) · [English](#english)
+
+Your Claude plan usage (5-hour window and weekly limit) on a 96×16 Bluetooth LED matrix, driven by a Raspberry Pi, with a small web panel on your local network.
+
+---
+
+## Français
+
+### Ce que ça fait
+
+L'écran affiche en permanence :
+- la barre du **5H**, avec son pourcentage, et toutes les 30 s l'heure de réinitialisation ;
+- la barre de la **semaine** (WEEK).
+
+Deux animations sont activables séparément : un flash quand la fenêtre de 5 heures repart à zéro, et la barre qui grimpe quand l'usage augmente. En cas de problème persistant, les dernières valeurs restent affichées et un code rouge (`AUTH`, `NET` ou `ERR`) remplace le pourcentage.
+
+Le panneau web, accessible sur `http://claude-meter.local:8080` ou sur l'IP du Pi, permet de :
+- voir un aperçu de l'écran en direct ;
+- choisir la méthode de connexion au compte Claude ;
+- trouver l'écran en Bluetooth ;
+- régler la luminosité, l'orientation et l'alimentation ;
+- régler les intervalles et les animations.
+
+Tous les réglages sont enregistrés dans `.env`.
+
+### Matériel
+
+- Un Raspberry Pi avec Bluetooth (testé sur Raspberry Pi OS, base Debian).
+- Une matrice LED iPixel 96×16 pilotée en BLE via [pypixelcolor](https://pypi.org/project/pypixelcolor/).
+
+### Installation
+
+```bash
+git clone https://github.com/Ruben746/claude-led-screen-meter.git
+cd claude-led-screen-meter
+./install.sh
+```
+
+L'installeur :
+- installe Bluetooth et avahi ;
+- crée l'environnement Python ;
+- copie `.env.example` en `.env` ;
+- crée deux services : `claude-meter` pour l'application, `claude-meter-mdns` pour l'adresse `claude-meter.local`.
+
+Le Pi garde son propre nom d'hôte. Pour un autre nom : `LED_MDNS_NAME=bureau-meter ./install.sh`.
+
+Ouvre ensuite le panneau, clique sur **Find displays**, choisis ton écran, puis connecte le compte Claude.
+
+### Connexion au compte Claude
+
+Deux méthodes, à choisir dans le panneau.
+
+**Claude Code** (recommandé). Connecte Claude Code une fois sur le Pi lui-même :
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+claude        # se connecter avec le compte Claude, puis /exit
+```
+
+Le meter lit `~/.claude/.credentials.json` et renouvelle le jeton tout seul. Deux précautions :
+- Ne copie pas ce fichier depuis un ordinateur qui utilise aussi Claude Code : les deux se disputeraient le même jeton.
+- Ne fais pas `claude logout` sur le Pi.
+
+Dans ce mode, l'usage est lu au plus une fois par minute.
+
+**Session claude.ai**. Colle la valeur du cookie `sessionKey` de claude.ai dans le panneau. Si Cloudflare bloque, ajoute aussi `cf_clearance` et le User-Agent exact du navigateur d'où vient ce cookie. L'organisation est détectée automatiquement. Une session expire : il faudra la recoller de temps en temps.
+
+### Avertissement
+
+Projet personnel, **non affilié à Anthropic et non approuvé par Anthropic**. Il repose sur des endpoints non documentés, qui peuvent changer ou disparaître à tout moment. Les conditions d'Anthropic réservent les jetons OAuth des abonnements Claude à Claude Code et Claude.ai, et encadrent l'accès automatisé à leurs services. Les deux méthodes de connexion sortent donc de ce cadre. Tu les utilises sous ta propre responsabilité, avec ton propre compte.
+
+Le panneau n'a pas d'authentification par défaut : garde-le sur ton réseau local. `LED_ADMIN_TOKEN` exige un code pour modifier le compte ou l'écran.
+
+### Dépannage
+
+```bash
+journalctl -u claude-meter -f              # logs en direct
+sudo systemctl restart claude-meter
+```
+
+- **Find displays ne trouve rien** : l'écran est peut-être encore connecté à l'app du téléphone. Ferme-la, puis relance la recherche.
+- **`claude-meter.local` ne répond pas** : utilise l'IP du Pi. Certains réseaux ou appareils Android anciens ne résolvent pas le mDNS.
+
+---
+
+## English
+
+### What it does
+
+The display shows at all times:
+- the **5H** bar with its percentage, plus the reset time every 30 s;
+- the **weekly** bar (WEEK).
+
+Two animations can be switched on separately: a flash when the 5-hour window resets, and the bar climbing when usage goes up. If a problem persists, the last values stay on screen and a red code (`AUTH`, `NET` or `ERR`) replaces the percentage.
+
+The web panel, at `http://claude-meter.local:8080` or the Pi's IP, lets you:
+- see a live preview of the display;
+- choose how to sign in to Claude;
+- find the display over Bluetooth;
+- set brightness, orientation and power;
+- set the intervals and animations.
+
+Every setting is saved to `.env`.
+
+### Hardware
+
+- A Raspberry Pi with Bluetooth (tested on Raspberry Pi OS, Debian based).
+- A 96×16 iPixel LED matrix, driven over BLE through [pypixelcolor](https://pypi.org/project/pypixelcolor/).
+
+### Install
+
+```bash
+git clone https://github.com/Ruben746/claude-led-screen-meter.git
+cd claude-led-screen-meter
+./install.sh
+```
+
+The installer:
+- installs Bluetooth and avahi;
+- creates the Python environment;
+- copies `.env.example` to `.env`;
+- creates two services: `claude-meter` for the app, `claude-meter-mdns` for the `claude-meter.local` address.
+
+The Pi keeps its own hostname. For another name: `LED_MDNS_NAME=desk-meter ./install.sh`.
+
+Then open the panel, click **Find displays**, pick your display and connect your Claude account.
+
+### Signing in to Claude
+
+Two methods, chosen in the panel.
+
+**Claude Code** (recommended). Sign in to Claude Code once, on the Pi itself:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+claude        # sign in with your Claude account, then /exit
+```
+
+The meter reads `~/.claude/.credentials.json` and renews the token on its own. Two precautions:
+- Don't copy that file from a computer that also runs Claude Code: both would fight over the same token.
+- Don't run `claude logout` on the Pi.
+
+In this mode usage is read at most once a minute.
+
+**claude.ai session**. Paste the value of the claude.ai `sessionKey` cookie into the panel. If Cloudflare blocks the requests, also add `cf_clearance` and the exact User-Agent of the browser that cookie comes from. The organization is detected automatically. Sessions expire, so you will need to paste a fresh one now and then.
+
+### Disclaimer
+
+Personal project, **not affiliated with or endorsed by Anthropic**. It relies on undocumented endpoints that can change or disappear at any time. Anthropic's terms restrict OAuth tokens from Claude subscriptions to Claude Code and Claude.ai, and limit automated access to their services, so both sign-in methods fall outside what Anthropic permits. Use them at your own risk, with your own account.
+
+The panel has no authentication by default: keep it on your local network. `LED_ADMIN_TOKEN` requires a code to change the account or the display.
+
+### Troubleshooting
+
+```bash
+journalctl -u claude-meter -f              # live logs
+sudo systemctl restart claude-meter
+```
+
+- **Find displays finds nothing**: the display may still be connected to the phone app. Close the app and search again.
+- **`claude-meter.local` does not respond**: use the Pi's IP. Some networks and older Android devices don't resolve mDNS.
