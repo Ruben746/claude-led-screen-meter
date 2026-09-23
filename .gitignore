@@ -1,4 +1,6 @@
 .env
+.meter-oauth.json
+.meter-oauth.json.tmp
 .venv/
 __pycache__/
 *.png

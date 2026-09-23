@@ -6,6 +6,12 @@ import time
 import asyncio
 import io
 import unicodedata
+import base64
+import hashlib
+import secrets
+import threading
+from functools import wraps
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -57,6 +63,9 @@ OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_UA = os.getenv("LED_OAUTH_UA", "claude-code/2.1.0")
 OAUTH_MIN_REFRESH = 60        # this endpoint rate-limits hard: never poll faster
+METER_OAUTH_FILE = os.path.join(BASE_DIR, ".meter-oauth.json")
+OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+OAUTH_LOCK = threading.RLock()
 
 # claude.ai session (mode "session")
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -193,12 +202,63 @@ def _parse_usage(data):
 
 # ---------- Mode "oauth": Claude Code credentials file ----------
 
+def oauth_locked(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        with OAUTH_LOCK:
+            return fn(*args, **kwargs)
+    return call
+
+
+def begin_oauth_login():
+    verifier = secrets.token_urlsafe(32)
+    state = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    flow = {"verifier": verifier, "state": state, "expires_at": time.monotonic() + 600}
+    url = "https://claude.ai/oauth/authorize?" + urlencode({
+        "code": "true", "client_id": OAUTH_CLIENT_ID, "response_type": "code",
+        "redirect_uri": OAUTH_REDIRECT_URI, "scope": "org:create_api_key user:profile",
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
+    })
+    return flow, url
+
+
+@oauth_locked
+def finish_oauth_login(flow, pasted_code):
+    global OAUTH_FILE
+    if flow["expires_at"] <= time.monotonic():
+        raise ValueError("Sign-in expired. Start a new connection.")
+    code, separator, state = str(pasted_code).strip().partition("#")
+    if not code or len(code) > 4096 or any(c.isspace() for c in code):
+        raise ValueError("Paste the authorization code shown by Claude.")
+    if separator and not secrets.compare_digest(state, flow["state"]):
+        raise ValueError("This code belongs to another connection. Start again.")
+    r = requests.post(OAUTH_TOKEN_URL, json={
+        "grant_type": "authorization_code", "code": code, "state": flow["state"],
+        "client_id": OAUTH_CLIENT_ID, "redirect_uri": OAUTH_REDIRECT_URI,
+        "code_verifier": flow["verifier"],
+    }, headers={"Content-Type": "application/json", "User-Agent": OAUTH_UA}, timeout=15)
+    if r.status_code != 200:
+        raise ValueError(f"Claude refused the connection (HTTP {r.status_code}). Start again.")
+    tokens = r.json()
+    if not tokens.get("access_token") or not tokens.get("refresh_token"):
+        raise ValueError("Claude did not return renewable credentials. Start again.")
+    data = {"claudeAiOauth": {
+        "accessToken": tokens["access_token"], "refreshToken": tokens["refresh_token"],
+        "expiresAt": int((time.time() + float(tokens.get("expires_in", 28800))) * 1000),
+        "scopes": str(tokens.get("scope", "org:create_api_key user:profile")).split(),
+    }}
+    _save_oauth(data, METER_OAUTH_FILE)
+    persist_env({"LED_OAUTH_FILE": METER_OAUTH_FILE, "LED_AUTH_MODE": "oauth"})
+    OAUTH_FILE = METER_OAUTH_FILE
+
+
 def _load_oauth():
     try:
         with open(OAUTH_FILE) as f:
             data = json.load(f)
     except FileNotFoundError:
-        raise AuthError("Claude Code is not signed in on this device")
+        raise AuthError("Not connected. Use Connect with Claude in the web panel.")
     except ValueError:
         raise AuthError("credentials file is unreadable")
     oauth = data.get("claudeAiOauth") or {}
@@ -207,13 +267,14 @@ def _load_oauth():
     return data, oauth
 
 
-def _save_oauth(data):
-    os.makedirs(os.path.dirname(OAUTH_FILE), exist_ok=True)
-    tmp = OAUTH_FILE + ".tmp"
-    with open(tmp, "w") as f:
+def _save_oauth(data, path=None):
+    path = path or OAUTH_FILE
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(data, f)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, OAUTH_FILE)
+    os.replace(tmp, path)
 
 
 def _refresh_oauth(data, oauth):
@@ -243,6 +304,7 @@ def _refresh_oauth(data, oauth):
     return oauth
 
 
+@oauth_locked
 def _get_usage_oauth():
     data, oauth = _load_oauth()          # re-read every time: picks up a fresh login
     if int(oauth.get("expiresAt", 0)) - 60_000 < time.time() * 1000:
@@ -277,6 +339,7 @@ def oauth_status():
             "plan": oauth.get("subscriptionType")}
 
 
+@oauth_locked
 def save_oauth_json(raw):
     data = json.loads(raw)
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
@@ -594,13 +657,26 @@ HTML_PAGE = r"""<!doctype html>
       <input type="password" id="admin" autocomplete="off">
     </div>
     <div class="seg" role="group" aria-label="Sign-in method">
-      <button data-mode="oauth">Claude Code</button>
+      <button data-mode="oauth">Claude OAuth</button>
       <button data-mode="session">claude.ai session</button>
     </div>
     <p class="note" id="authNote"></p>
 
     <div id="pane-oauth" hidden>
       <p class="note" id="oauthState"></p>
+      <p class="row"><button id="startOauth" class="primary">Connect with Claude</button></p>
+      <div id="oauthFlow" hidden>
+        <ol>
+          <li><a id="oauthLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a> and authorize the connection.</li>
+          <li>Copy the code shown by Claude and paste it below. Keep this panel open.</li>
+        </ol>
+        <label for="oauthCode">Authorization code</label>
+        <input type="password" id="oauthCode" autocomplete="off" spellcheck="false">
+        <p class="row"><button id="finishOauth" class="primary">Complete connection</button></p>
+      </div>
+      <p class="note">The meter keeps its own connection and renews it automatically. No Claude Code installation is needed. The sign-in link expires after 10 minutes.</p>
+      <details>
+      <summary>Existing Claude Code connection (advanced)</summary>
       <ol>
         <li>Open a terminal on this device (SSH).</li>
         <li>Install Claude Code: <code>curl -fsSL https://claude.ai/install.sh | bash</code></li>
@@ -611,6 +687,7 @@ HTML_PAGE = r"""<!doctype html>
         <summary>Paste a credentials file instead</summary>
         <textarea id="credsJson" rows="4" placeholder='{"claudeAiOauth":{"accessToken":"…","refreshToken":"…"}}'></textarea>
         <p class="row"><button id="saveOauth" class="primary">Save credentials</button></p>
+      </details>
       </details>
     </div>
 
@@ -747,6 +824,28 @@ document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click'
   if (b.dataset.mode === state.auth.mode) return;
   if ((await api('/api/auth', {mode: b.dataset.mode})).ok) { toast('Sign-in method changed'); load(); }
 }));
+let oauthFlowId = null;
+$('#startOauth').addEventListener('click', async () => {
+  const btn = $('#startOauth'); btn.disabled = true;
+  const j = await api('/api/oauth/start', {});
+  btn.disabled = false;
+  if (j.ok) {
+    oauthFlowId = j.flow_id;
+    $('#oauthCode').value = '';
+    $('#oauthLink').href = j.url;
+    $('#oauthFlow').hidden = false;
+    $('#oauthLink').focus();
+  }
+});
+$('#finishOauth').addEventListener('click', async () => {
+  const code = $('#oauthCode').value.trim();
+  if (!oauthFlowId || !code) { toast('Start a connection and paste the code from Claude'); return; }
+  const btn = $('#finishOauth'); btn.disabled = true; $('#startOauth').disabled = true;
+  const j = await api('/api/oauth/complete', {flow_id: oauthFlowId, code});
+  btn.disabled = false; $('#startOauth').disabled = false;
+  $('#oauthCode').value = ''; oauthFlowId = null; $('#oauthFlow').hidden = true;
+  if (j.ok) { toast('Connected, checking usage…'); load(); }
+});
 $('#saveOauth').addEventListener('click', async () => {
   const j = await api('/api/auth', {mode:'oauth', credentials_json: $('#credsJson').value.trim()});
   if (j.ok) { $('#credsJson').value = ''; toast('Credentials saved'); load(); }
@@ -780,6 +879,7 @@ load(); setInterval(load, 3000);
 
 def make_app(display, st):
     app = web.Application()
+    pending_oauth = {}
 
     def denied(data):
         return bool(ADMIN_TOKEN) and str(data.get("token", "")) != ADMIN_TOKEN
@@ -840,6 +940,41 @@ def make_app(display, st):
             return fail(f"saved, but the display did not respond: {e}", 502)
         return web.json_response({"ok": True})
 
+    async def api_oauth_start(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        for key, flow in list(pending_oauth.items()):
+            if flow["expires_at"] <= time.monotonic():
+                del pending_oauth[key]
+        if len(pending_oauth) >= 16:
+            return fail("Too many pending connections. Wait 10 minutes and retry.", 429)
+        flow, url = begin_oauth_login()
+        flow_id = secrets.token_urlsafe(32)
+        pending_oauth[flow_id] = flow
+        return web.json_response({"ok": True, "flow_id": flow_id, "url": url},
+                                 headers={"Cache-Control": "no-store"})
+
+    async def api_oauth_complete(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        flow = pending_oauth.pop(str(data.get("flow_id", "")), None)
+        if flow is None:
+            return fail("Connection not found or already used. Start again.")
+        try:
+            await asyncio.to_thread(finish_oauth_login, flow, data.get("code") or "")
+        except ValueError as e:
+            return fail(str(e))
+        except requests.RequestException:
+            return fail("Cannot reach Claude. Start a new connection and try again.", 502)
+        except OSError:
+            return fail("Cannot save the connection. Check the meter folder permissions.", 500)
+        AUTH["mode"] = "oauth"
+        st.last_ok, st.last_error, st.status = None, "", None
+        st.force_refetch = True
+        return web.json_response({"ok": True})
+
     async def api_auth(request):
         data = await request.json()
         if denied(data):
@@ -849,7 +984,7 @@ def make_app(display, st):
             return fail("unknown sign-in method")
         try:
             if data.get("credentials_json"):
-                save_oauth_json(data["credentials_json"])
+                await asyncio.to_thread(save_oauth_json, data["credentials_json"])
             if mode == "session":
                 updates = {}
                 for field, key, env in (("session_key", "key", "CLAUDE_SESSION_KEY"),
@@ -901,6 +1036,8 @@ def make_app(display, st):
         web.get("/api/preview.png", api_preview),
         web.post("/api/set", api_set),
         web.post("/api/auth", api_auth),
+        web.post("/api/oauth/start", api_oauth_start),
+        web.post("/api/oauth/complete", api_oauth_complete),
         web.post("/api/scan", api_scan),
         web.post("/api/device", api_device),
     ])

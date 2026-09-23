@@ -52,7 +52,20 @@ Ouvre ensuite le panneau, clique sur **Find displays**, choisis ton écran, puis
 
 Deux méthodes, à choisir dans le panneau.
 
-**Claude Code** (recommandé). Connecte Claude Code une fois sur le Pi lui-même :
+**Claude OAuth** (recommandé, connexion par code comme dans GetLimits).
+
+1. Dans le panneau, choisis **Claude OAuth**, puis **Connect with Claude**.
+2. Clique sur **Open Claude sign-in**, connecte-toi sur Claude et autorise la connexion.
+3. Copie le code affiché par Claude, reviens dans le panneau et colle-le dans **Authorization code**.
+4. Clique sur **Complete connection**.
+
+Garde le panneau ouvert pendant la connexion. Le lien expire après 10 minutes ; après une erreur ou un redémarrage, recommence avec **Connect with Claude**.
+
+Le compteur enregistre ses propres identifiants dans `.meter-oauth.json` (exclu de Git, permissions privées) et renouvelle automatiquement le jeton. Il conserve aussi le nouveau jeton de renouvellement quand Claude le remplace. Aucune installation de Claude Code ni copie de cookie n'est nécessaire. Les permissions demandées sont `org:create_api_key user:profile`, sans `user:inference`.
+
+Pour une installation existante, fais `git pull`, puis `sudo systemctl restart claude-meter`, et connecte-toi une fois avec le nouveau bouton. Les anciens identifiants Claude Code ne sont pas écrasés. Une révocation côté Claude peut toujours nécessiter une nouvelle connexion.
+
+**Claude Code (ancien parcours, avancé)**. Tu peux conserver une connexion sur le Pi lui-même :
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
@@ -131,7 +144,20 @@ Then open the panel, click **Find displays**, pick your display and connect your
 
 Two methods, chosen in the panel.
 
-**Claude Code** (recommended). Sign in to Claude Code once, on the Pi itself:
+**Claude OAuth** (recommended, copy-and-paste code flow like GetLimits).
+
+1. Select **Claude OAuth**, then **Connect with Claude** in the panel.
+2. Follow **Open Claude sign-in**, sign in to Claude and authorize the connection.
+3. Copy the code Claude displays and paste it into **Authorization code** in the panel.
+4. Click **Complete connection**.
+
+Keep the panel open. The link expires after 10 minutes; after an error or restart, use **Connect with Claude** again.
+
+The meter stores its own credentials in `.meter-oauth.json` (Git-ignored, private permissions), automatically refreshes the access token and saves rotated refresh tokens. No Claude Code installation or cookie copying is needed. Requested scopes are `org:create_api_key user:profile`, without `user:inference`.
+
+For an existing installation, run `git pull` and `sudo systemctl restart claude-meter`, then connect once using the new button. Existing Claude Code credentials are not overwritten. Revocation by Claude can still require signing in again.
+
+**Claude Code (legacy, advanced)**. You can keep using a login on the Pi itself:
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
