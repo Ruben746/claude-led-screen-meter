@@ -1,6 +1,8 @@
 .env
 .meter-oauth.json
 .meter-oauth.json.tmp
+.spotify-oauth.json
+.spotify-oauth.json.tmp
 .venv/
 __pycache__/
 *.png

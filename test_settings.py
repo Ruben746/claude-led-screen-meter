@@ -80,7 +80,9 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(meter, 'ENV_PATH', path), patch.object(meter, 'ADMIN_TOKEN', ''):
                 async with TestClient(TestServer(meter.make_app(display, state))) as client:
                     values = dict(brightness=24, orientation=2, alternate=45, refresh=90,
-                                  reset_anim=False, increase_anim=False, power=False)
+                                  reset_anim=False, increase_anim=False, power=False,
+                                  spotify_visible=False, spotify_enabled=False,
+                                  spotify_hold=17, spotify_speed=45, spotify_artist=False)
                     for name, value in values.items():
                         response = await client.post('/api/set', json={'name': name, 'value': value})
                         self.assertEqual(response.status, 200)

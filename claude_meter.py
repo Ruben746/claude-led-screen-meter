@@ -21,6 +21,7 @@ import requests
 from PIL import Image, ImageDraw
 from aiohttp import web
 from pypixelcolor import AsyncClient
+from spotify_meter import SpotifyClient, SpotifyError, SpotifyView, poll_spotify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.getenv("LED_ENV_PATH", os.path.join(BASE_DIR, ".env"))
@@ -566,6 +567,13 @@ class State:
         self.redraw = False
         self.preview = b""
         self.preview_rev = 0
+        self.spotify_visible = env_bool("LED_SPOTIFY_VISIBLE")
+        self.spotify_enabled = env_bool("LED_SPOTIFY_ENABLED")
+        self.spotify_hold = max(2, min(120, env_int("SPOTIFY_HOLD", 10)))
+        self.spotify_speed = max(5, min(300, env_int("SPOTIFY_SPEED", 60)))
+        self.spotify_artist = env_bool("SPOTIFY_SHOW_ARTIST")
+        self.spotify_track = None
+        self.spotify_error = ""
 
 
 def parse_orientation(value):
@@ -582,6 +590,11 @@ SETTINGS = {  # name -> (env key, parser)
     "reset_anim": ("LED_RESET_ANIM", bool),
     "increase_anim": ("LED_INCREASE_ANIM", bool),
     "power": ("LED_POWER", bool),
+    "spotify_visible": ("LED_SPOTIFY_VISIBLE", bool),
+    "spotify_enabled": ("LED_SPOTIFY_ENABLED", bool),
+    "spotify_hold": ("SPOTIFY_HOLD", lambda v: max(2, min(120, int(v)))),
+    "spotify_speed": ("SPOTIFY_SPEED", lambda v: max(5, min(300, int(v)))),
+    "spotify_artist": ("SPOTIFY_SHOW_ARTIST", bool),
 }
 
 
@@ -622,6 +635,16 @@ HTML_PAGE = r"""<!doctype html>
     background:radial-gradient(circle, transparent 52%, var(--bezel) 58%);
     background-size:calc(100% / 96) calc(100% / 16); }
   .off .matrix img { opacity:.08; }
+  .tabs { display:flex; gap:4px; margin:18px 0; border-bottom:1px solid var(--line); }
+  .tabs button { flex:1; border:0; border-bottom:3px solid transparent; border-radius:0; background:none; padding:10px 8px; color:var(--mute); }
+  .tabs button[aria-selected=true] { border-bottom-color:var(--ink); color:var(--ink); font-weight:650; }
+  .now-playing { display:grid; gap:4px; border-left:3px solid var(--ok); padding:4px 14px; margin:18px 0; overflow-wrap:anywhere; }
+  .now-playing .note { margin:0; }
+  #spotifyStatus { margin:12px 0; }
+  #spotifyTitle { font-size:18px; line-height:1.3; }
+  a { color:var(--focus); }
+  [role=tabpanel] { padding-top:12px; }
+  #spotifyClientId { font-family:ui-monospace, monospace; font-size:13px; }
 
   .readout { display:grid; grid-template-columns:repeat(3,1fr); margin:14px 0 30px; }
   .readout div { padding:0 4px; }
@@ -673,7 +696,19 @@ HTML_PAGE = r"""<!doctype html>
     <span id="conn">Loading…</span>
   </header>
 
+    <div class="field" id="adminField" hidden>
+      <label for="admin">Admin code</label>
+      <input type="password" id="admin" autocomplete="off">
+    </div>
+
+  <nav class="tabs" role="tablist" aria-label="Navigation principale">
+    <button id="tab-meter" role="tab" aria-selected="true" aria-controls="panel-meter" data-tab="meter">Compteur</button>
+    <button id="tab-spotify" role="tab" aria-selected="false" aria-controls="panel-spotify" tabindex="-1" data-tab="spotify">Spotify</button>
+    <button id="tab-settings" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1" data-tab="settings">Paramètres</button>
+  </nav>
   <div class="bezel" id="bezel"><div class="matrix"><img id="preview" alt="Current picture on the LED display"></div></div>
+
+  <div id="panel-meter" role="tabpanel" aria-labelledby="tab-meter">
   <dl class="readout">
     <div><dt>5-hour window</dt><dd id="r5h">–</dd></div>
     <div><dt>Weekly</dt><dd id="rwk">–</dd></div>
@@ -682,10 +717,6 @@ HTML_PAGE = r"""<!doctype html>
 
   <section aria-labelledby="h-account">
     <h2 id="h-account">Claude account</h2>
-    <div class="field" id="adminField" hidden>
-      <label for="admin">Admin code</label>
-      <input type="password" id="admin" autocomplete="off">
-    </div>
     <div class="seg" role="group" aria-label="Sign-in method">
       <button data-mode="oauth">Claude OAuth</button>
       <button data-mode="session">claude.ai session</button>
@@ -745,6 +776,59 @@ HTML_PAGE = r"""<!doctype html>
     </div>
   </section>
 
+  </div>
+
+  <div id="panel-spotify" role="tabpanel" aria-labelledby="tab-spotify" hidden>
+    <section aria-labelledby="h-spotify">
+      <h2 id="h-spotify">Spotify sur l’écran</h2>
+      <p class="note">La pochette et le titre apparaissent à chaque nouveau morceau, puis l’écran revient aux quotas Claude.</p>
+      <p id="spotifyStatus" class="note" role="status" aria-live="polite">Spotify non connecté.</p>
+      <div class="now-playing" id="spotifyTrack" hidden>
+        <span class="note" id="spotifyPlayback"></span>
+        <strong id="spotifyTitle"></strong>
+        <span id="spotifyArtist" class="note"></span>
+      </div>
+      <label class="check"><input type="checkbox" id="spotify_enabled" data-set="spotify_enabled"> Afficher les nouveaux morceaux sur l’écran</label>
+      <div class="field">
+        <label for="spotify_hold">Durée d’affichage <output id="spotify_holdOut"></output></label>
+        <input type="range" id="spotify_hold" data-set="spotify_hold" min="2" max="120" step="1">
+      </div>
+      <div class="field">
+        <label for="spotify_speed">Vitesse de défilement <output id="spotify_speedOut"></output></label>
+        <input type="range" id="spotify_speed" data-set="spotify_speed" min="5" max="300" step="5">
+      </div>
+      <label class="check"><input type="checkbox" id="spotify_artist" data-set="spotify_artist"> Afficher aussi le nom de l’artiste</label>
+    </section>
+    <section aria-labelledby="h-spotify-account">
+      <h2 id="h-spotify-account">Connexion Spotify</h2>
+      <details id="spotifySetup" open>
+        <summary>Configurer la connexion</summary>
+        <ol class="note">
+          <li>Dans le <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">tableau de bord Spotify Developers</a>, crée ou ouvre ton application et active Web API.</li>
+          <li>Ajoute cette adresse dans « Redirect URIs » : <code id="spotifyRedirect"></code></li>
+          <li>Copie le Client ID ci-dessous, puis connecte Spotify depuis un navigateur sur l’ordinateur qui exécute LED Meter.</li>
+        </ol>
+        <p class="note">Aucun Client Secret n’est nécessaire. Si Spotify refuse l’accès, vérifie que ton compte est autorisé dans ton application Spotify.</p>
+      </details>
+      <div class="field">
+        <label for="spotifyClientId">Client ID Spotify</label>
+        <input type="text" id="spotifyClientId" autocomplete="off" spellcheck="false" maxlength="32" placeholder="Client ID de ton application">
+      </div>
+      <div class="row">
+        <button id="connectSpotify" class="primary">Connecter Spotify</button>
+        <button id="disconnectSpotify" hidden>Déconnecter</button>
+      </div>
+      <p id="spotifyResult" class="note" role="status" aria-live="polite" hidden></p>
+      <p id="spotifyLogin" hidden><a id="spotifyLink" target="_blank" rel="noopener noreferrer">Ouvrir la connexion Spotify</a></p>
+    </section>
+  </div>
+
+  <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <section aria-labelledby="h-tabs">
+      <h2 id="h-tabs">Onglets</h2>
+      <label class="check"><input type="checkbox" id="spotify_visible" data-set="spotify_visible"> Afficher l’onglet Spotify</label>
+      <p class="note">Masquer Spotify met aussi son suivi en pause. La connexion et les réglages restent enregistrés.</p>
+    </section>
   <section aria-labelledby="h-display">
     <h2 id="h-display">Display</h2>
     <div class="field">
@@ -779,11 +863,38 @@ HTML_PAGE = r"""<!doctype html>
     <label class="check"><input type="checkbox" id="reset_anim" data-set="reset_anim"> Flash when the 5-hour window resets</label>
     <label class="check"><input type="checkbox" id="increase_anim" data-set="increase_anim"> Animate the bar when usage goes up</label>
   </section>
+  </div>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
 const $ = s => document.querySelector(s);
 let state = null, rev = -1, toastTimer;
+let activeTab = ['spotify', 'settings'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'meter';
+function selectTab(name, focus = false) {
+  if (name === 'spotify' && state && !state.spotify_visible) name = 'meter';
+  activeTab = name;
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    const selected = button.dataset.tab === name;
+    button.setAttribute('aria-selected', selected);
+    button.tabIndex = selected ? 0 : -1;
+    $('#panel-' + button.dataset.tab).hidden = !selected;
+    if (selected && focus) button.focus();
+  });
+}
+document.querySelectorAll('[data-tab]').forEach(button => {
+  button.addEventListener('click', () => selectTab(button.dataset.tab));
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...document.querySelectorAll('[data-tab]')].filter(b => !b.hidden);
+    const index = buttons.indexOf(button);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+    selectTab(buttons[next].dataset.tab, true);
+  });
+});
+selectTab(activeTab);
+const unit = name => name === 'brightness' ? '%' : name === 'spotify_speed' ? ' px/s' : ' s';
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -834,14 +945,31 @@ function render(s) {
   $('#adminField').hidden = !s.admin_required;
 
   $('#devName').textContent = s.device.address ? s.device.address + (s.device.connected ? ' (connected)' : ' (not connected)') : 'No display selected';
-  for (const k of ['brightness', 'alternate', 'refresh'])
+  for (const k of ['brightness', 'alternate', 'refresh', 'spotify_hold', 'spotify_speed'])
     if (document.activeElement !== $('#' + k)) $('#' + k).value = s[k];
   $('#brightnessOut').textContent = s.brightness + '%';
   $('#alternateOut').textContent = s.alternate + ' s';
   $('#refreshOut').textContent = s.refresh + ' s';
   $('#refreshNote').hidden = !(a.mode === 'oauth' && s.refresh < 60);
-  for (const k of ['power', 'reset_anim', 'increase_anim']) $('#' + k).checked = s[k];
+  for (const k of ['power', 'reset_anim', 'increase_anim', 'spotify_visible', 'spotify_enabled', 'spotify_artist']) $('#' + k).checked = s[k];
   document.querySelectorAll('[data-o]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.o === s.orientation));
+  $('#tab-spotify').hidden = !s.spotify_visible;
+  if (!s.spotify_visible && activeTab === 'spotify') selectTab('meter', true);
+  $('#spotify_holdOut').textContent = s.spotify_hold + ' s';
+  $('#spotify_speedOut').textContent = s.spotify_speed + ' px/s';
+  const sp = s.spotify;
+  $('#spotifyRedirect').textContent = sp.redirect_uri;
+  if (!$('#spotifyClientId').value && sp.client_id) $('#spotifyClientId').value = sp.client_id;
+  $('#disconnectSpotify').hidden = !sp.connected;
+  $('#spotifyStatus').textContent = sp.error || (!sp.connected ? 'Spotify non connecté.'
+    : !s.spotify_visible || !s.spotify_enabled ? 'Spotify connecté · affichage en pause.'
+    : sp.is_playing ? 'Spotify connecté · lecture en cours.' : 'Spotify connecté · en attente de musique.');
+  $('#spotifyStatus').className = 'note' + (sp.error ? ' bad' : '');
+  $('#spotifyTrack').hidden = !sp.title;
+  $('#spotifyTitle').textContent = sp.title;
+  $('#spotifyArtist').textContent = sp.artist;
+  $('#spotifyPlayback').textContent = sp.is_playing ? 'En cours de lecture' : 'En pause';
+
 }
 async function load() {
   try { render(await (await fetch('/api/state')).json()); }
@@ -849,7 +977,7 @@ async function load() {
 }
 
 document.querySelectorAll('input[type=range][data-set]').forEach(el => {
-  el.addEventListener('input', () => $('#' + el.id + 'Out').textContent = el.value + (el.id === 'brightness' ? '%' : ' s'));
+  el.addEventListener('input', () => $('#' + el.id + 'Out').textContent = el.value + unit(el.id));
   el.addEventListener('change', () => set(el.dataset.set, +el.value));
 });
 document.querySelectorAll('input[type=checkbox][data-set]').forEach(el =>
@@ -929,14 +1057,30 @@ $('#scan').addEventListener('click', async () => {
     li.append(b); ul.append(li);
   }
 });
+$('#connectSpotify').addEventListener('click', async () => {
+  const button = $('#connectSpotify'); button.disabled = true;
+  const result = await api('/api/spotify/start', {client_id: $('#spotifyClientId').value.trim()});
+  button.disabled = false;
+  $('#spotifyResult').hidden = false;
+  $('#spotifyResult').textContent = result.ok ? 'Ouvre le lien ci-dessous et autorise Spotify. Le retour au panneau est automatique.' : result.error;
+  $('#spotifyResult').className = 'note' + (result.ok ? '' : ' bad');
+  $('#spotifyLogin').hidden = !result.ok;
+  if (result.ok) { $('#spotifyLink').href = result.url; $('#spotifyLink').focus(); }
+});
+$('#disconnectSpotify').addEventListener('click', async () => {
+  if ((await api('/api/spotify/disconnect', {})).ok) {
+    $('#spotifyLogin').hidden = true; $('#spotifyResult').hidden = true; load();
+  }
+});
 load(); setInterval(load, 3000);
 </script>
 </body>
 </html>"""
 
 
-def make_app(display, st):
+def make_app(display, st, spotify=None):
     app = web.Application()
+    spotify = spotify or SpotifyClient(os.path.join(BASE_DIR, '.spotify-oauth.json'), WEB_PORT)
     pending_oauth = {}
     oauth_retry_at = 0
     oauth_server_delay = False
@@ -965,6 +1109,13 @@ def make_app(display, st):
             "alternate": st.alternate, "refresh": st.refresh,
             "reset_anim": st.reset_anim, "increase_anim": st.increase_anim,
             "preview_rev": st.preview_rev,
+            "spotify_visible": st.spotify_visible, "spotify_enabled": st.spotify_enabled,
+            "spotify_hold": st.spotify_hold, "spotify_speed": st.spotify_speed,
+            "spotify_artist": st.spotify_artist,
+            "spotify": {**spotify.status(), "error": st.spotify_error,
+                        "title": (st.spotify_track or {}).get('title', ''),
+                        "artist": (st.spotify_track or {}).get('artist', ''),
+                        "is_playing": (st.spotify_track or {}).get('is_playing', False)},
             "admin_required": bool(ADMIN_TOKEN),
             "device": {"address": display.address, "connected": display.connected},
             "auth": {
@@ -993,6 +1144,10 @@ def make_app(display, st):
         setattr(st, name, value)
         if env_key:
             persist_env({env_key: int(value) if isinstance(value, bool) else value})
+        if name.startswith('spotify_'):
+            if not st.spotify_visible or not st.spotify_enabled:
+                st.spotify_track = None
+            st.redraw = True
         if not display.address:
             st.redraw = True
             return web.json_response({"ok": True})
@@ -1108,6 +1263,36 @@ def make_app(display, st):
         st.redraw = True
         return web.json_response({"ok": True})
 
+    async def api_spotify_start(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        try:
+            url = await asyncio.to_thread(spotify.begin, data.get('client_id', ''))
+            return web.json_response({'ok': True, 'url': url}, headers={'Cache-Control': 'no-store'})
+        except SpotifyError as error:
+            return fail(str(error))
+
+    async def spotify_callback(request):
+        try:
+            await asyncio.to_thread(spotify.finish, request.query.get('state', ''),
+                                    request.query.get('code', ''), bool(request.query.get('error')))
+            st.spotify_error = ''
+        except SpotifyError as error:
+            st.spotify_error = str(error)
+        except (requests.RequestException, OSError, ValueError):
+            st.spotify_error = 'Connexion Spotify impossible. Réessaie depuis le panneau.'
+        # Redirect immediately so the authorization code does not remain in the UI.
+        raise web.HTTPFound('/#spotify', headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+
+    async def api_spotify_disconnect(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        await asyncio.to_thread(spotify.disconnect)
+        st.spotify_track, st.spotify_error, st.redraw = None, '', True
+        return web.json_response({'ok': True})
+
     app.add_routes([
         web.get("/", index),
         web.get("/api/state", api_state),
@@ -1118,6 +1303,9 @@ def make_app(display, st):
         web.post("/api/oauth/complete", api_oauth_complete),
         web.post("/api/scan", api_scan),
         web.post("/api/device", api_device),
+        web.post('/api/spotify/start', api_spotify_start),
+        web.post('/api/spotify/disconnect', api_spotify_disconnect),
+        web.get('/spotify/callback', spotify_callback),
     ])
     return app
 
@@ -1168,6 +1356,7 @@ async def display_loop(display, st):
     mode, reset_until = "pct", 0.0
     next_reset_at = time.monotonic() + st.alternate
     fails, next_try = 0, 0.0
+    spotify_view = SpotifyView()
 
     while True:
         # --- fetch usage ---
@@ -1221,10 +1410,15 @@ async def display_loop(display, st):
         else:
             top, color = (st.reset if mode == "reset" else f"{int(round(st.session))}%"), WHITE
         sig = (top, int(round(st.session)), int(round(st.weekly)))
+        spotify_frame = spotify_view.frame(st.spotify_track, now,
+            st.spotify_visible and st.spotify_enabled and st.power,
+            st.spotify_hold, st.spotify_speed, st.spotify_artist)
+        if spotify_frame is not None:
+            sig = ('spotify', spotify_view.last_id, int(now * 10))
         if st.redraw:
             st.redraw, last_sig = False, None
         if sig != last_sig:
-            img = render(st.session, st.weekly, top, color)
+            img = spotify_frame if spotify_frame is not None else render(st.session, st.weekly, top, color)
             buf = io.BytesIO()
             img.save(buf, "PNG")
             st.preview, st.preview_rev = buf.getvalue(), st.preview_rev + 1
@@ -1242,12 +1436,13 @@ async def display_loop(display, st):
             else:
                 last_sig = sig
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1 if spotify_frame is not None else 1)
 
 
 async def main():
     st = State()
     display = LedDisplay(os.getenv("LED_ADDRESS", "").strip())
+    spotify = SpotifyClient(os.path.join(BASE_DIR, '.spotify-oauth.json'), WEB_PORT)
 
     async def on_connect(client):
         await client.set_brightness(st.brightness)
@@ -1256,7 +1451,7 @@ async def main():
     display.on_connect = on_connect
 
     # Web panel first: it works even when the display is off or not chosen yet.
-    runner = web.AppRunner(make_app(display, st))
+    runner = web.AppRunner(make_app(display, st, spotify))
     await runner.setup()
     await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
     if env_bool("LED_OPEN_BROWSER", False):
@@ -1268,9 +1463,12 @@ async def main():
     print(f"Web panel: http://{MDNS_NAME}.local:{WEB_PORT}  (port {WEB_PORT} on this device's IP)")
     if not display.address:
         print("No display selected yet: open the web panel and use 'Find displays'.")
+    spotify_task = asyncio.create_task(poll_spotify(spotify, st))
     try:
         await display_loop(display, st)
     finally:
+        spotify_task.cancel()
+        await asyncio.gather(spotify_task, return_exceptions=True)
         await runner.cleanup()
         await display.close()
 

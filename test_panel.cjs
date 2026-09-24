@@ -10,14 +10,17 @@ const timers = [];
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
     value: '', textContent: '', hidden: false, disabled: false,
-    classList: { add() {}, remove() {} },
+    dataset: {}, attributes: {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    setAttribute(name, value) { this.attributes[name] = value; },
     addEventListener(event, handler) { this[event] = handler; },
     focus() {},
   });
   return elements.get(id);
 }
 const context = {
-  document: { querySelector: element, querySelectorAll: () => [] },
+  location: {hash: ''},
+  document: { querySelector: element, querySelectorAll: selector => selector === '[data-tab]' ? tabs : [] },
   fetch: async (path) => ({ json: async () => {
     if ((path === '/api/oauth/start' && limitedStart) ||
         (path === '/api/oauth/complete' && limitedComplete)) {
@@ -29,6 +32,9 @@ const context = {
   }}),
   setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, setInterval() {},
 };
+const tabs = ['meter', 'spotify', 'settings'].map(name => {
+  const tab = element('#tab-' + name); tab.dataset.tab = name; return tab;
+});
 vm.createContext(context);
 vm.runInContext(script, context);
 (async () => {
@@ -54,5 +60,15 @@ vm.runInContext(script, context);
   assert.match(element('#oauthResult').textContent, /HTTP 429/);
   timers.at(-1).fn();
   assert.equal(element('#startOauth').disabled, false);
+  await element('#tab-spotify').click();
+  assert.equal(element('#panel-spotify').hidden, false);
+  assert.equal(element('#panel-meter').hidden, true);
+  assert.equal(element('#tab-spotify').attributes['aria-selected'], true);
+  vm.runInContext(`state = {spotify_visible: false}; selectTab('spotify');`, context);
+  assert.equal(element('#panel-spotify').hidden, true);
+  assert.equal(element('#panel-meter').hidden, false);
+  element('#tab-spotify').hidden = true;
+  element('#tab-meter').keydown({key:'ArrowRight', preventDefault() {}});
+  assert.equal(element('#panel-settings').hidden, false);
   console.log('Panel keeps errors visible and respects both OAuth cooldowns: OK');
 })().catch(error => { console.error(error); process.exitCode = 1; });
