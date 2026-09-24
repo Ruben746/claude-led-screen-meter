@@ -72,7 +72,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 claude        # se connecter avec le compte Claude, puis /exit
 ```
 
-Le meter lit `~/.claude/.credentials.json` et renouvelle le jeton tout seul. Deux précautions :
+Ce parcours exige de définir explicitement `LED_OAUTH_FILE=~/.claude/.credentials.json` dans `.env`, puis de redémarrer le compteur. Par défaut, seul `.meter-oauth.json` est utilisé : aucun ancien identifiant n'est lu ni renouvelé automatiquement. Deux précautions :
 - Ne copie pas ce fichier depuis un ordinateur qui utilise aussi Claude Code : les deux se disputeraient le même jeton.
 - Ne fais pas `claude logout` sur le Pi.
 
@@ -164,7 +164,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 claude        # sign in with your Claude account, then /exit
 ```
 
-The meter reads `~/.claude/.credentials.json` and renews the token on its own. Two precautions:
+This legacy method requires explicitly setting `LED_OAUTH_FILE=~/.claude/.credentials.json` in `.env` and restarting the meter. By default, only `.meter-oauth.json` is used: other applications' credentials are never automatically read or refreshed. Two precautions:
 - Don't copy that file from a computer that also runs Claude Code: both would fight over the same token.
 - Don't run `claude logout` on the Pi.
 

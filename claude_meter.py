@@ -56,14 +56,14 @@ RESET_TRIGGER_PREV = env_int("LED_RESET_PREV", 15)
 RESET_TRIGGER_NOW = env_int("LED_RESET_NOW", 5)
 BLE_CONNECT_TIMEOUT = 15
 
-# Claude Code credentials (mode "oauth")
-OAUTH_FILE = os.path.expanduser(os.getenv("LED_OAUTH_FILE", "~/.claude/.credentials.json"))
+# Independent meter credentials by default; legacy file sharing is opt-in.
+METER_OAUTH_FILE = os.path.join(BASE_DIR, ".meter-oauth.json")
+OAUTH_FILE = os.path.expanduser(os.getenv("LED_OAUTH_FILE", METER_OAUTH_FILE))
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_UA = os.getenv("LED_OAUTH_UA", "claude-code/2.1.0")
 OAUTH_MIN_REFRESH = 60        # this endpoint rate-limits hard: never poll faster
-METER_OAUTH_FILE = os.path.join(BASE_DIR, ".meter-oauth.json")
 OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 OAUTH_LOCK = threading.RLock()
 
@@ -678,6 +678,7 @@ HTML_PAGE = r"""<!doctype html>
       <p class="note">The meter keeps its own connection and renews it automatically. No Claude Code installation is needed. The sign-in link expires after 10 minutes.</p>
       <details>
       <summary>Existing Claude Code connection (advanced)</summary>
+      <p class="note">To use this legacy method, explicitly set LED_OAUTH_FILE=~/.claude/.credentials.json in .env and restart the meter. Other applications' credentials are never loaded automatically.</p>
       <ol>
         <li>Open a terminal on this device (SSH).</li>
         <li>Install Claude Code: <code>curl -fsSL https://claude.ai/install.sh | bash</code></li>

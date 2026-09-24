@@ -3,6 +3,9 @@ import hashlib
 import json
 import tempfile
 import time
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -14,6 +17,15 @@ import claude_meter as meter
 
 
 class OAuthTests(unittest.TestCase):
+    def test_default_credentials_are_private_to_meter(self):
+        env = os.environ.copy()
+        env.pop("LED_OAUTH_FILE", None)
+        env["LED_ENV_PATH"] = str(Path(self.tmp.name) / "missing.env")
+        result = subprocess.run([sys.executable, "-c",
+            "import claude_meter as m; assert m.OAUTH_FILE == m.METER_OAUTH_FILE"],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
