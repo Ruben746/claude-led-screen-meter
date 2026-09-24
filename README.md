@@ -23,7 +23,7 @@ Le panneau web, accessible sur `http://claude-meter.local:8080` ou sur l'IP du P
 - régler la luminosité, l'orientation et l'alimentation ;
 - régler les intervalles et les animations.
 
-Tous les réglages sont enregistrés dans `.env`.
+L'écran choisi et tous les réglages sont enregistrés dans `.env`, y compris l'alimentation. Le compteur se reconnecte au démarrage et après une coupure Bluetooth, puis réapplique luminosité, orientation et alimentation. Après un échec, les tentatives automatiques sont espacées de 10 secondes. Seules les orientations 0° et 180° sont proposées ; les anciennes valeurs 90°/270° reviennent à 0° au chargement.
 
 ### Matériel
 
@@ -62,14 +62,14 @@ Garde la fenêtre ouverte pendant l'utilisation. Ferme-la ou utilise **Ctrl+C** 
 
 Deux méthodes, à choisir dans le panneau.
 
-**Claude OAuth** (recommandé, connexion par code comme dans GetLimits).
+**Claude OAuth** (connexion par code ; des erreurs HTTP 429 persistantes restent possibles).
 
 1. Dans le panneau, choisis **Claude OAuth**, puis **Connect with Claude**.
 2. Clique sur **Open Claude sign-in**, connecte-toi sur Claude et autorise la connexion.
 3. Copie le code affiché par Claude, reviens dans le panneau et colle-le dans **Authorization code**.
 4. Clique sur **Complete connection**.
 
-Garde le panneau ouvert pendant la connexion. Le lien expire après 10 minutes ; après une erreur ou un redémarrage, recommence avec **Connect with Claude**.
+Garde le panneau ouvert pendant la connexion. Le lien expire après 10 minutes ; après une erreur ou un redémarrage, recommence avec **Connect with Claude**. En cas de HTTP 429, respecte le délai affiché avant de demander un nouveau code. Le compteur utilise `Retry-After` (secondes ou date HTTP), ou une pause locale de 120 secondes si le serveur ne donne aucun délai exploitable. Cette pause ne garantit pas la réussite suivante et n'est pas conservée après un redémarrage. Un échec conserve la méthode de connexion existante ; garde le mode session s'il fonctionne.
 
 Le compteur enregistre ses propres identifiants dans `.meter-oauth.json` (exclu de Git, permissions privées) et renouvelle automatiquement le jeton. Il conserve aussi le nouveau jeton de renouvellement quand Claude le remplace. Aucune installation de Claude Code ni copie de cookie n'est nécessaire. Les permissions demandées sont `org:create_api_key user:profile`, sans `user:inference`.
 
@@ -125,7 +125,9 @@ The web panel, at `http://claude-meter.local:8080` or the Pi's IP, lets you:
 - set brightness, orientation and power;
 - set the intervals and animations.
 
-Every setting is saved to `.env`.
+The selected display and every setting are saved to `.env`, including power. The meter reconnects at startup and after Bluetooth disconnections, then restores brightness, orientation and power. Failed automatic attempts are spaced 10 seconds apart. Only 0° and 180° orientations are supported; legacy 90°/270° values load as 0°.
+
+Bluetooth connection detection uses the private `AsyncClient._session.is_connected` property because pypixelcolor 0.5.0 can retain a stale client connection flag after a remote disconnect. Recheck this integration when upgrading the dependency.
 
 ### Hardware
 
@@ -162,14 +164,14 @@ Double-click **Lancer.bat** with Python 3 installed. The launcher prepares the e
 
 Two methods, chosen in the panel.
 
-**Claude OAuth** (recommended, copy-and-paste code flow like GetLimits).
+**Claude OAuth** (copy-and-paste code flow; persistent HTTP 429 errors remain possible).
 
 1. Select **Claude OAuth**, then **Connect with Claude** in the panel.
 2. Follow **Open Claude sign-in**, sign in to Claude and authorize the connection.
 3. Copy the code Claude displays and paste it into **Authorization code** in the panel.
 4. Click **Complete connection**.
 
-Keep the panel open. The link expires after 10 minutes; after an error or restart, use **Connect with Claude** again.
+Keep the panel open. The link expires after 10 minutes; after an error or restart, use **Connect with Claude** again. For HTTP 429, wait for the displayed delay before requesting a fresh code. The meter respects `Retry-After` (seconds or HTTP date), falling back to a local 120-second pause if the server supplies no usable delay. This does not guarantee success and is not retained across restarts. A failed login preserves the existing sign-in method; keep session mode if it works.
 
 The meter stores its own credentials in `.meter-oauth.json` (Git-ignored, private permissions), automatically refreshes the access token and saves rotated refresh tokens. No Claude Code installation or cookie copying is needed. Requested scopes are `org:create_api_key user:profile`, without `user:inference`.
 

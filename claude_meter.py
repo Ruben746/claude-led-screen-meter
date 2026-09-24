@@ -10,6 +10,8 @@ import base64
 import hashlib
 import secrets
 import threading
+import math
+from email.utils import parsedate_to_datetime
 from functools import wraps
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
@@ -162,16 +164,21 @@ class AuthError(Exception):
 
 
 class RateLimited(Exception):
-    def __init__(self, retry_after=120):
+    def __init__(self, retry_after=120, server_delay=True):
         super().__init__(f"rate limited ({retry_after}s)")
         self.retry_after = retry_after
+        self.server_delay = server_delay
 
 
 def _retry_after(r, default=120):
+    value = r.headers.get("retry-after")
     try:
-        return max(30, int(float(r.headers.get("retry-after", default))))
-    except (TypeError, ValueError):
-        return default
+        return max(30, math.ceil(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return max(30, math.ceil(parsedate_to_datetime(value).timestamp() - time.time()))
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return default
 
 
 def format_reset(reset):
@@ -238,6 +245,9 @@ def finish_oauth_login(flow, pasted_code):
         "client_id": OAUTH_CLIENT_ID, "redirect_uri": OAUTH_REDIRECT_URI,
         "code_verifier": flow["verifier"],
     }, headers={"Content-Type": "application/json", "User-Agent": OAUTH_UA}, timeout=15)
+    if r.status_code == 429:
+        delay = _retry_after(r, default=None)
+        raise RateLimited(delay if delay is not None else 120, server_delay=delay is not None)
     if r.status_code != 200:
         raise ValueError(f"Claude refused the connection (HTTP {r.status_code}). Start again.")
     tokens = r.json()
@@ -455,15 +465,27 @@ class LedDisplay:
         self.lock = asyncio.Lock()      # one BLE operation at a time
         self.on_connect = None
 
+    @property
+    def connected(self):
+        # AsyncClient keeps a stale flag after a remote disconnect; its session
+        # tracks the actual BLE disconnection callback.
+        return self.client is not None and self.client._session.is_connected
+
     async def connect(self):
         client = AsyncClient(self.address)
-        await asyncio.wait_for(client.connect(), timeout=BLE_CONNECT_TIMEOUT)
-        self.client = client
-        if self.on_connect:
-            try:
+        try:
+            await asyncio.wait_for(client.connect(), timeout=BLE_CONNECT_TIMEOUT)
+            if self.on_connect:
                 await self.on_connect(client)
-            except Exception as e:
-                print("Initial settings not applied:", e)
+        except (Exception, asyncio.CancelledError):
+            try:
+                # AsyncClient.disconnect skips cleanup when connect failed before
+                # setting its flag, even if the underlying BLE link is open.
+                await client._session.disconnect()
+            except Exception:
+                pass
+            raise
+        self.client = client
         print("Display connected:", self.address)
 
     async def close(self):
@@ -478,7 +500,8 @@ class LedDisplay:
         if not self.address:
             raise RuntimeError("no display selected")
         async with self.lock:
-            if self.client is None:
+            if not self.connected:
+                await self.close()
                 await self.connect()
             try:
                 await getattr(self.client, method)(*args)
@@ -494,7 +517,8 @@ class LedDisplay:
         if not self.address:
             raise RuntimeError("no display selected")
         async with self.lock:
-            if self.client is None:
+            if not self.connected:
+                await self.close()
                 await self.connect()
             await self.client.send_text(strip_accents(text), **opts)
 
@@ -526,12 +550,12 @@ async def scan_devices(display):
 class State:
     def __init__(self):
         self.brightness = max(0, min(100, env_int("LED_BRIGHTNESS", 60)))
-        self.orientation = max(0, min(3, env_int("LED_ORIENTATION", 0)))
+        self.orientation = 2 if env_int("LED_ORIENTATION", 0) == 2 else 0
         self.alternate = max(10, env_int("LED_ALTERNATE", 30))
         self.refresh = max(15, env_int("LED_REFRESH", 60))
         self.reset_anim = env_bool("LED_RESET_ANIM")
         self.increase_anim = env_bool("LED_INCREASE_ANIM")
-        self.power = True
+        self.power = env_bool("LED_POWER")
         self.session = 0.0
         self.weekly = 0.0
         self.reset = "--:--"
@@ -544,14 +568,20 @@ class State:
         self.preview_rev = 0
 
 
+def parse_orientation(value):
+    if type(value) is not int or value not in (0, 2):
+        raise ValueError("orientation must be 0 or 2")
+    return int(value)
+
+
 SETTINGS = {  # name -> (env key, parser)
     "brightness": ("LED_BRIGHTNESS", lambda v: max(0, min(100, int(v)))),
-    "orientation": ("LED_ORIENTATION", lambda v: max(0, min(3, int(v)))),
+    "orientation": ("LED_ORIENTATION", parse_orientation),
     "alternate": ("LED_ALTERNATE", lambda v: max(10, min(300, int(v)))),
     "refresh": ("LED_REFRESH", lambda v: max(15, min(600, int(v)))),
     "reset_anim": ("LED_RESET_ANIM", bool),
     "increase_anim": ("LED_INCREASE_ANIM", bool),
-    "power": (None, bool),
+    "power": ("LED_POWER", bool),
 }
 
 
@@ -730,7 +760,7 @@ HTML_PAGE = r"""<!doctype html>
     <div class="field">
       <span class="lbl">Orientation</span>
       <div class="seg" role="group" aria-label="Orientation">
-        <button data-o="0">0°</button><button data-o="1">90°</button><button data-o="2">180°</button><button data-o="3">270°</button>
+        <button data-o="0">0°</button><button data-o="2">180°</button>
       </div>
     </div>
   </section>
@@ -835,6 +865,11 @@ function oauthResult(message, failed = false) {
   el.textContent = message; el.hidden = false;
   el.className = failed ? 'note bad' : 'note';
 }
+function oauthCooldown(seconds) {
+  if (!seconds) return;
+  $('#startOauth').disabled = true;
+  setTimeout(() => { $('#startOauth').disabled = false; }, seconds * 1000);
+}
 $('#startOauth').addEventListener('click', async () => {
   const btn = $('#startOauth'); btn.disabled = true;
   oauthResult('Preparing the connection…');
@@ -847,7 +882,10 @@ $('#startOauth').addEventListener('click', async () => {
     $('#oauthFlow').hidden = false;
     $('#oauthLink').focus();
     oauthResult('Open Claude sign-in, then paste the code below.');
-  } else { oauthResult(j.error || 'Could not start the connection.', true); }
+  } else {
+    oauthResult(j.error || 'Could not start the connection.', true);
+    oauthCooldown(j.retry_after);
+  }
 });
 $('#finishOauth').addEventListener('click', async () => {
   const code = $('#oauthCode').value.trim();
@@ -862,7 +900,8 @@ $('#finishOauth').addEventListener('click', async () => {
   if (j.ok) {
     oauthResult('Connection saved. Checking usage…'); load();
   } else {
-    oauthResult((j.error || 'Connection failed.') + ' Click Connect with Claude to get a new code.', true);
+    oauthResult((j.error || 'Connection failed.') + (j.retry_after ? '' : ' Click Connect with Claude to get a new code.'), true);
+    oauthCooldown(j.retry_after);
   }
 });
 $('#saveOauth').addEventListener('click', async () => {
@@ -899,6 +938,16 @@ load(); setInterval(load, 3000);
 def make_app(display, st):
     app = web.Application()
     pending_oauth = {}
+    oauth_retry_at = 0
+    oauth_server_delay = False
+
+    def oauth_limited(seconds):
+        reason = ("Claude supplied a retry delay." if oauth_server_delay else
+                  "Claude supplied no usable retry delay; this is a local precaution.")
+        return web.json_response({
+            "ok": False, "retry_after": seconds,
+            "error": f"Claude refused the OAuth request (HTTP 429). {reason} Wait at least {seconds}s before requesting a new code. This does not guarantee the next attempt will succeed.",
+        }, status=429, headers={"Retry-After": str(seconds)})
 
     def denied(data):
         return bool(ADMIN_TOKEN) and str(data.get("token", "")) != ADMIN_TOKEN
@@ -917,7 +966,7 @@ def make_app(display, st):
             "reset_anim": st.reset_anim, "increase_anim": st.increase_anim,
             "preview_rev": st.preview_rev,
             "admin_required": bool(ADMIN_TOKEN),
-            "device": {"address": display.address, "connected": display.client is not None},
+            "device": {"address": display.address, "connected": display.connected},
             "auth": {
                 "mode": AUTH["mode"], "status": st.status,
                 "last_ok": st.last_ok, "last_error": st.last_error,
@@ -963,6 +1012,8 @@ def make_app(display, st):
         data = await request.json()
         if denied(data):
             return fail("wrong admin code", 403)
+        if time.monotonic() < oauth_retry_at:
+            return oauth_limited(max(1, int(oauth_retry_at - time.monotonic()) + 1))
         for key, flow in list(pending_oauth.items()):
             if flow["expires_at"] <= time.monotonic():
                 del pending_oauth[key]
@@ -975,14 +1026,22 @@ def make_app(display, st):
                                  headers={"Cache-Control": "no-store"})
 
     async def api_oauth_complete(request):
+        nonlocal oauth_retry_at, oauth_server_delay
         data = await request.json()
         if denied(data):
             return fail("wrong admin code", 403)
+        if time.monotonic() < oauth_retry_at:
+            return oauth_limited(max(1, int(oauth_retry_at - time.monotonic()) + 1))
         flow = pending_oauth.pop(str(data.get("flow_id", "")), None)
         if flow is None:
             return fail("Connection not found or already used. Start again.")
         try:
             await asyncio.to_thread(finish_oauth_login, flow, data.get("code") or "")
+        except RateLimited as e:
+            oauth_retry_at = time.monotonic() + e.retry_after
+            oauth_server_delay = e.server_delay
+            print(f"OAuth code exchange: HTTP 429; next attempt in at least {e.retry_after}s")
+            return oauth_limited(e.retry_after)
         except ValueError as e:
             return fail(str(e))
         except requests.RequestException:
@@ -1105,6 +1164,7 @@ async def play_increase_animation(display, st, old_val, new_val):
 
 async def display_loop(display, st):
     last_fetch, prev_session, last_sig = 0.0, None, None
+    next_display_try = 0.0
     mode, reset_until = "pct", 0.0
     next_reset_at = time.monotonic() + st.alternate
     fails, next_try = 0, 0.0
@@ -1154,6 +1214,8 @@ async def display_loop(display, st):
             mode, next_reset_at = "pct", now + st.alternate
 
         # --- redraw only when the picture changes ---
+        if display.address and not display.connected and time.monotonic() >= next_display_try:
+            last_sig = None
         if st.status:
             top, color = st.status, RED
         else:
@@ -1166,11 +1228,16 @@ async def display_loop(display, st):
             buf = io.BytesIO()
             img.save(buf, "PNG")
             st.preview, st.preview_rev = buf.getvalue(), st.preview_rev + 1
-            if st.power and display.address:
+            if display.address:
                 try:
-                    await display.send_image(save_frame(img))
-                    last_sig = sig
+                    if time.monotonic() >= next_display_try:
+                        if st.power:
+                            await display.send_image(save_frame(img))
+                        else:
+                            await display.set_power(False)
+                        last_sig = sig
                 except Exception as e:
+                    next_display_try = time.monotonic() + 10
                     print("Display send error:", e)
             else:
                 last_sig = sig
@@ -1185,6 +1252,7 @@ async def main():
     async def on_connect(client):
         await client.set_brightness(st.brightness)
         await client.set_orientation(st.orientation)
+        await client.set_power(st.power)
     display.on_connect = on_connect
 
     # Web panel first: it works even when the display is off or not chosen yet.

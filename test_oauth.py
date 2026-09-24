@@ -79,6 +79,21 @@ class OAuthTests(unittest.TestCase):
                 meter.finish_oauth_login(flow, 'code')
         self.assertFalse(Path(meter.METER_OAUTH_FILE).exists())
 
+    def test_login_rate_limit_preserves_retry_delay(self):
+        flow, _ = meter.begin_oauth_login()
+        response = Mock(status_code=429, headers={'retry-after': '300'})
+        with patch.object(meter.requests, 'post', return_value=response):
+            with self.assertRaises(meter.RateLimited) as caught:
+                meter.finish_oauth_login(flow, 'code')
+        self.assertEqual(caught.exception.retry_after, 300)
+
+    def test_retry_after_http_date_and_invalid_values(self):
+        with patch.object(meter.time, 'time', return_value=0):
+            self.assertEqual(meter._retry_after(Mock(headers={
+                'retry-after': 'Thu, 01 Jan 1970 00:05:00 GMT'})), 300)
+        for value in ('bad', 'inf', 'nan', ''):
+            self.assertEqual(meter._retry_after(Mock(headers={'retry-after': value})), 120)
+
     def test_expiry_refreshes_before_usage_and_401_retries_once(self):
         meter._save_oauth({'claudeAiOauth': {'accessToken': 'old', 'refreshToken': 'refresh', 'expiresAt': 0}})
         with patch.object(meter.requests, 'post', return_value=self.response(
@@ -98,7 +113,7 @@ class OAuthRouteTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.state = meter.State()
         self.client = TestClient(TestServer(meter.make_app(
-            SimpleNamespace(address="", client=None), self.state)))
+            SimpleNamespace(address="", client=None, connected=False), self.state)))
         await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
         self.admin = patch.object(meter, "ADMIN_TOKEN", "admin")
@@ -135,6 +150,17 @@ class OAuthRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 502)
             self.assertNotIn("secret", await response.text())
         self.assertEqual(meter.AUTH["mode"], "session")
+
+    async def test_rate_limit_blocks_new_attempts(self):
+        response = await self.client.post('/api/oauth/start', json={'token': 'admin'})
+        flow = await response.json()
+        with patch.object(meter, 'finish_oauth_login', side_effect=meter.RateLimited(300)):
+            response = await self.client.post('/api/oauth/complete', json={
+                'token': 'admin', 'flow_id': flow['flow_id'], 'code': 'code'})
+        self.assertEqual(response.status, 429)
+        self.assertEqual((await response.json())['retry_after'], 300)
+        response = await self.client.post('/api/oauth/start', json={'token': 'admin'})
+        self.assertEqual(response.status, 429)
 
 
 if __name__ == '__main__':
