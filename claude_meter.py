@@ -6,6 +6,14 @@ import time
 import asyncio
 import io
 import unicodedata
+import base64
+import hashlib
+import secrets
+import threading
+import math
+from email.utils import parsedate_to_datetime
+from functools import wraps
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -13,6 +21,7 @@ import requests
 from PIL import Image, ImageDraw
 from aiohttp import web
 from pypixelcolor import AsyncClient
+from spotify_meter import SpotifyClient, SpotifyError, SpotifyView, poll_spotify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.getenv("LED_ENV_PATH", os.path.join(BASE_DIR, ".env"))
@@ -50,13 +59,16 @@ RESET_TRIGGER_PREV = env_int("LED_RESET_PREV", 15)
 RESET_TRIGGER_NOW = env_int("LED_RESET_NOW", 5)
 BLE_CONNECT_TIMEOUT = 15
 
-# Claude Code credentials (mode "oauth")
-OAUTH_FILE = os.path.expanduser(os.getenv("LED_OAUTH_FILE", "~/.claude/.credentials.json"))
+# Independent meter credentials by default; legacy file sharing is opt-in.
+METER_OAUTH_FILE = os.path.join(BASE_DIR, ".meter-oauth.json")
+OAUTH_FILE = os.path.expanduser(os.getenv("LED_OAUTH_FILE", METER_OAUTH_FILE))
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_UA = os.getenv("LED_OAUTH_UA", "claude-code/2.1.0")
 OAUTH_MIN_REFRESH = 60        # this endpoint rate-limits hard: never poll faster
+OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+OAUTH_LOCK = threading.RLock()
 
 # claude.ai session (mode "session")
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -153,16 +165,21 @@ class AuthError(Exception):
 
 
 class RateLimited(Exception):
-    def __init__(self, retry_after=120):
+    def __init__(self, retry_after=120, server_delay=True):
         super().__init__(f"rate limited ({retry_after}s)")
         self.retry_after = retry_after
+        self.server_delay = server_delay
 
 
 def _retry_after(r, default=120):
+    value = r.headers.get("retry-after")
     try:
-        return max(30, int(float(r.headers.get("retry-after", default))))
-    except (TypeError, ValueError):
-        return default
+        return max(30, math.ceil(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return max(30, math.ceil(parsedate_to_datetime(value).timestamp() - time.time()))
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return default
 
 
 def format_reset(reset):
@@ -193,12 +210,66 @@ def _parse_usage(data):
 
 # ---------- Mode "oauth": Claude Code credentials file ----------
 
+def oauth_locked(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        with OAUTH_LOCK:
+            return fn(*args, **kwargs)
+    return call
+
+
+def begin_oauth_login():
+    verifier = secrets.token_urlsafe(32)
+    state = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    flow = {"verifier": verifier, "state": state, "expires_at": time.monotonic() + 600}
+    url = "https://claude.ai/oauth/authorize?" + urlencode({
+        "code": "true", "client_id": OAUTH_CLIENT_ID, "response_type": "code",
+        "redirect_uri": OAUTH_REDIRECT_URI, "scope": "org:create_api_key user:profile",
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
+    })
+    return flow, url
+
+
+@oauth_locked
+def finish_oauth_login(flow, pasted_code):
+    global OAUTH_FILE
+    if flow["expires_at"] <= time.monotonic():
+        raise ValueError("Sign-in expired. Start a new connection.")
+    code, separator, state = str(pasted_code).strip().partition("#")
+    if not code or len(code) > 4096 or any(c.isspace() for c in code):
+        raise ValueError("Paste the authorization code shown by Claude.")
+    if separator and not secrets.compare_digest(state, flow["state"]):
+        raise ValueError("This code belongs to another connection. Start again.")
+    r = requests.post(OAUTH_TOKEN_URL, json={
+        "grant_type": "authorization_code", "code": code, "state": flow["state"],
+        "client_id": OAUTH_CLIENT_ID, "redirect_uri": OAUTH_REDIRECT_URI,
+        "code_verifier": flow["verifier"],
+    }, headers={"Content-Type": "application/json", "User-Agent": OAUTH_UA}, timeout=15)
+    if r.status_code == 429:
+        delay = _retry_after(r, default=None)
+        raise RateLimited(delay if delay is not None else 120, server_delay=delay is not None)
+    if r.status_code != 200:
+        raise ValueError(f"Claude refused the connection (HTTP {r.status_code}). Start again.")
+    tokens = r.json()
+    if not tokens.get("access_token") or not tokens.get("refresh_token"):
+        raise ValueError("Claude did not return renewable credentials. Start again.")
+    data = {"claudeAiOauth": {
+        "accessToken": tokens["access_token"], "refreshToken": tokens["refresh_token"],
+        "expiresAt": int((time.time() + float(tokens.get("expires_in", 28800))) * 1000),
+        "scopes": str(tokens.get("scope", "org:create_api_key user:profile")).split(),
+    }}
+    _save_oauth(data, METER_OAUTH_FILE)
+    persist_env({"LED_OAUTH_FILE": METER_OAUTH_FILE, "LED_AUTH_MODE": "oauth"})
+    OAUTH_FILE = METER_OAUTH_FILE
+
+
 def _load_oauth():
     try:
         with open(OAUTH_FILE) as f:
             data = json.load(f)
     except FileNotFoundError:
-        raise AuthError("Claude Code is not signed in on this device")
+        raise AuthError("Not connected. Use Connect with Claude in the web panel.")
     except ValueError:
         raise AuthError("credentials file is unreadable")
     oauth = data.get("claudeAiOauth") or {}
@@ -207,13 +278,14 @@ def _load_oauth():
     return data, oauth
 
 
-def _save_oauth(data):
-    os.makedirs(os.path.dirname(OAUTH_FILE), exist_ok=True)
-    tmp = OAUTH_FILE + ".tmp"
-    with open(tmp, "w") as f:
+def _save_oauth(data, path=None):
+    path = path or OAUTH_FILE
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(data, f)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, OAUTH_FILE)
+    os.replace(tmp, path)
 
 
 def _refresh_oauth(data, oauth):
@@ -243,6 +315,7 @@ def _refresh_oauth(data, oauth):
     return oauth
 
 
+@oauth_locked
 def _get_usage_oauth():
     data, oauth = _load_oauth()          # re-read every time: picks up a fresh login
     if int(oauth.get("expiresAt", 0)) - 60_000 < time.time() * 1000:
@@ -277,6 +350,7 @@ def oauth_status():
             "plan": oauth.get("subscriptionType")}
 
 
+@oauth_locked
 def save_oauth_json(raw):
     data = json.loads(raw)
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
@@ -360,10 +434,10 @@ def percentage_color(value):
 
 
 def draw_bar(draw, y, value, height=3):
-    """Each column takes the gradient colour of its position; unfilled part is dimmed."""
+    """Use one usage-dependent colour across the bar; dim the unfilled part."""
     filled = round(96 * max(0, min(100, value)) / 100)
+    base = percentage_color(value)
     for x in range(96):
-        base = percentage_color(x / 95 * 100)
         col = base if x < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
         for yy in range(height):
             draw.point((x, y + yy), fill=col)
@@ -392,15 +466,27 @@ class LedDisplay:
         self.lock = asyncio.Lock()      # one BLE operation at a time
         self.on_connect = None
 
+    @property
+    def connected(self):
+        # AsyncClient keeps a stale flag after a remote disconnect; its session
+        # tracks the actual BLE disconnection callback.
+        return self.client is not None and self.client._session.is_connected
+
     async def connect(self):
         client = AsyncClient(self.address)
-        await asyncio.wait_for(client.connect(), timeout=BLE_CONNECT_TIMEOUT)
-        self.client = client
-        if self.on_connect:
-            try:
+        try:
+            await asyncio.wait_for(client.connect(), timeout=BLE_CONNECT_TIMEOUT)
+            if self.on_connect:
                 await self.on_connect(client)
-            except Exception as e:
-                print("Initial settings not applied:", e)
+        except (Exception, asyncio.CancelledError):
+            try:
+                # AsyncClient.disconnect skips cleanup when connect failed before
+                # setting its flag, even if the underlying BLE link is open.
+                await client._session.disconnect()
+            except Exception:
+                pass
+            raise
+        self.client = client
         print("Display connected:", self.address)
 
     async def close(self):
@@ -415,7 +501,8 @@ class LedDisplay:
         if not self.address:
             raise RuntimeError("no display selected")
         async with self.lock:
-            if self.client is None:
+            if not self.connected:
+                await self.close()
                 await self.connect()
             try:
                 await getattr(self.client, method)(*args)
@@ -431,7 +518,8 @@ class LedDisplay:
         if not self.address:
             raise RuntimeError("no display selected")
         async with self.lock:
-            if self.client is None:
+            if not self.connected:
+                await self.close()
                 await self.connect()
             await self.client.send_text(strip_accents(text), **opts)
 
@@ -463,12 +551,12 @@ async def scan_devices(display):
 class State:
     def __init__(self):
         self.brightness = max(0, min(100, env_int("LED_BRIGHTNESS", 60)))
-        self.orientation = max(0, min(3, env_int("LED_ORIENTATION", 0)))
+        self.orientation = 2 if env_int("LED_ORIENTATION", 0) == 2 else 0
         self.alternate = max(10, env_int("LED_ALTERNATE", 30))
         self.refresh = max(15, env_int("LED_REFRESH", 60))
         self.reset_anim = env_bool("LED_RESET_ANIM")
         self.increase_anim = env_bool("LED_INCREASE_ANIM")
-        self.power = True
+        self.power = env_bool("LED_POWER")
         self.session = 0.0
         self.weekly = 0.0
         self.reset = "--:--"
@@ -479,16 +567,34 @@ class State:
         self.redraw = False
         self.preview = b""
         self.preview_rev = 0
+        self.spotify_visible = env_bool("LED_SPOTIFY_VISIBLE")
+        self.spotify_enabled = env_bool("LED_SPOTIFY_ENABLED")
+        self.spotify_hold = max(2, min(120, env_int("SPOTIFY_HOLD", 10)))
+        self.spotify_speed = max(5, min(300, env_int("SPOTIFY_SPEED", 60)))
+        self.spotify_artist = env_bool("SPOTIFY_SHOW_ARTIST")
+        self.spotify_track = None
+        self.spotify_error = ""
+
+
+def parse_orientation(value):
+    if type(value) is not int or value not in (0, 2):
+        raise ValueError("orientation must be 0 or 2")
+    return int(value)
 
 
 SETTINGS = {  # name -> (env key, parser)
     "brightness": ("LED_BRIGHTNESS", lambda v: max(0, min(100, int(v)))),
-    "orientation": ("LED_ORIENTATION", lambda v: max(0, min(3, int(v)))),
+    "orientation": ("LED_ORIENTATION", parse_orientation),
     "alternate": ("LED_ALTERNATE", lambda v: max(10, min(300, int(v)))),
     "refresh": ("LED_REFRESH", lambda v: max(15, min(600, int(v)))),
     "reset_anim": ("LED_RESET_ANIM", bool),
     "increase_anim": ("LED_INCREASE_ANIM", bool),
-    "power": (None, bool),
+    "power": ("LED_POWER", bool),
+    "spotify_visible": ("LED_SPOTIFY_VISIBLE", bool),
+    "spotify_enabled": ("LED_SPOTIFY_ENABLED", bool),
+    "spotify_hold": ("SPOTIFY_HOLD", lambda v: max(2, min(120, int(v)))),
+    "spotify_speed": ("SPOTIFY_SPEED", lambda v: max(5, min(300, int(v)))),
+    "spotify_artist": ("SPOTIFY_SHOW_ARTIST", bool),
 }
 
 
@@ -529,6 +635,16 @@ HTML_PAGE = r"""<!doctype html>
     background:radial-gradient(circle, transparent 52%, var(--bezel) 58%);
     background-size:calc(100% / 96) calc(100% / 16); }
   .off .matrix img { opacity:.08; }
+  .tabs { display:flex; gap:4px; margin:18px 0; border-bottom:1px solid var(--line); }
+  .tabs button { flex:1; border:0; border-bottom:3px solid transparent; border-radius:0; background:none; padding:10px 8px; color:var(--mute); }
+  .tabs button[aria-selected=true] { border-bottom-color:var(--ink); color:var(--ink); font-weight:650; }
+  .now-playing { display:grid; gap:4px; border-left:3px solid var(--ok); padding:4px 14px; margin:18px 0; overflow-wrap:anywhere; }
+  .now-playing .note { margin:0; }
+  #spotifyStatus { margin:12px 0; }
+  #spotifyTitle { font-size:18px; line-height:1.3; }
+  a { color:var(--focus); }
+  [role=tabpanel] { padding-top:12px; }
+  #spotifyClientId { font-family:ui-monospace, monospace; font-size:13px; }
 
   .readout { display:grid; grid-template-columns:repeat(3,1fr); margin:14px 0 30px; }
   .readout div { padding:0 4px; }
@@ -580,7 +696,19 @@ HTML_PAGE = r"""<!doctype html>
     <span id="conn">Loading…</span>
   </header>
 
+    <div class="field" id="adminField" hidden>
+      <label for="admin">Admin code</label>
+      <input type="password" id="admin" autocomplete="off">
+    </div>
+
+  <nav class="tabs" role="tablist" aria-label="Navigation principale">
+    <button id="tab-meter" role="tab" aria-selected="true" aria-controls="panel-meter" data-tab="meter">Compteur</button>
+    <button id="tab-spotify" role="tab" aria-selected="false" aria-controls="panel-spotify" tabindex="-1" data-tab="spotify">Spotify</button>
+    <button id="tab-settings" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1" data-tab="settings">Paramètres</button>
+  </nav>
   <div class="bezel" id="bezel"><div class="matrix"><img id="preview" alt="Current picture on the LED display"></div></div>
+
+  <div id="panel-meter" role="tabpanel" aria-labelledby="tab-meter">
   <dl class="readout">
     <div><dt>5-hour window</dt><dd id="r5h">–</dd></div>
     <div><dt>Weekly</dt><dd id="rwk">–</dd></div>
@@ -589,18 +717,29 @@ HTML_PAGE = r"""<!doctype html>
 
   <section aria-labelledby="h-account">
     <h2 id="h-account">Claude account</h2>
-    <div class="field" id="adminField" hidden>
-      <label for="admin">Admin code</label>
-      <input type="password" id="admin" autocomplete="off">
-    </div>
     <div class="seg" role="group" aria-label="Sign-in method">
-      <button data-mode="oauth">Claude Code</button>
+      <button data-mode="oauth">Claude OAuth</button>
       <button data-mode="session">claude.ai session</button>
     </div>
     <p class="note" id="authNote"></p>
 
     <div id="pane-oauth" hidden>
       <p class="note" id="oauthState"></p>
+      <p class="row"><button id="startOauth" class="primary">Connect with Claude</button></p>
+      <p class="note" id="oauthResult" role="status" aria-live="polite" hidden></p>
+      <div id="oauthFlow" hidden>
+        <ol>
+          <li><a id="oauthLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a> and authorize the connection.</li>
+          <li>Copy the code shown by Claude and paste it below. Keep this panel open.</li>
+        </ol>
+        <label for="oauthCode">Authorization code</label>
+        <input type="password" id="oauthCode" autocomplete="off" spellcheck="false">
+        <p class="row"><button id="finishOauth" class="primary">Complete connection</button></p>
+      </div>
+      <p class="note">The meter keeps its own connection and renews it automatically. No Claude Code installation is needed. The sign-in link expires after 10 minutes.</p>
+      <details>
+      <summary>Existing Claude Code connection (advanced)</summary>
+      <p class="note">To use this legacy method, explicitly set LED_OAUTH_FILE=~/.claude/.credentials.json in .env and restart the meter. Other applications' credentials are never loaded automatically.</p>
       <ol>
         <li>Open a terminal on this device (SSH).</li>
         <li>Install Claude Code: <code>curl -fsSL https://claude.ai/install.sh | bash</code></li>
@@ -611,6 +750,7 @@ HTML_PAGE = r"""<!doctype html>
         <summary>Paste a credentials file instead</summary>
         <textarea id="credsJson" rows="4" placeholder='{"claudeAiOauth":{"accessToken":"…","refreshToken":"…"}}'></textarea>
         <p class="row"><button id="saveOauth" class="primary">Save credentials</button></p>
+      </details>
       </details>
     </div>
 
@@ -636,6 +776,59 @@ HTML_PAGE = r"""<!doctype html>
     </div>
   </section>
 
+  </div>
+
+  <div id="panel-spotify" role="tabpanel" aria-labelledby="tab-spotify" hidden>
+    <section aria-labelledby="h-spotify">
+      <h2 id="h-spotify">Spotify sur l’écran</h2>
+      <p class="note">La pochette et le titre apparaissent à chaque nouveau morceau, puis l’écran revient aux quotas Claude.</p>
+      <p id="spotifyStatus" class="note" role="status" aria-live="polite">Spotify non connecté.</p>
+      <div class="now-playing" id="spotifyTrack" hidden>
+        <span class="note" id="spotifyPlayback"></span>
+        <strong id="spotifyTitle"></strong>
+        <span id="spotifyArtist" class="note"></span>
+      </div>
+      <label class="check"><input type="checkbox" id="spotify_enabled" data-set="spotify_enabled"> Afficher les nouveaux morceaux sur l’écran</label>
+      <div class="field">
+        <label for="spotify_hold">Durée d’affichage <output id="spotify_holdOut"></output></label>
+        <input type="range" id="spotify_hold" data-set="spotify_hold" min="2" max="120" step="1">
+      </div>
+      <div class="field">
+        <label for="spotify_speed">Vitesse de défilement <output id="spotify_speedOut"></output></label>
+        <input type="range" id="spotify_speed" data-set="spotify_speed" min="5" max="300" step="5">
+      </div>
+      <label class="check"><input type="checkbox" id="spotify_artist" data-set="spotify_artist"> Afficher aussi le nom de l’artiste</label>
+    </section>
+    <section aria-labelledby="h-spotify-account">
+      <h2 id="h-spotify-account">Connexion Spotify</h2>
+      <details id="spotifySetup" open>
+        <summary>Configurer la connexion</summary>
+        <ol class="note">
+          <li>Dans le <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">tableau de bord Spotify Developers</a>, crée ou ouvre ton application et active Web API.</li>
+          <li>Ajoute cette adresse dans « Redirect URIs » : <code id="spotifyRedirect"></code></li>
+          <li>Copie le Client ID ci-dessous, puis connecte Spotify depuis un navigateur sur l’ordinateur qui exécute LED Meter.</li>
+        </ol>
+        <p class="note">Aucun Client Secret n’est nécessaire. Si Spotify refuse l’accès, vérifie que ton compte est autorisé dans ton application Spotify.</p>
+      </details>
+      <div class="field">
+        <label for="spotifyClientId">Client ID Spotify</label>
+        <input type="text" id="spotifyClientId" autocomplete="off" spellcheck="false" maxlength="32" placeholder="Client ID de ton application">
+      </div>
+      <div class="row">
+        <button id="connectSpotify" class="primary">Connecter Spotify</button>
+        <button id="disconnectSpotify" hidden>Déconnecter</button>
+      </div>
+      <p id="spotifyResult" class="note" role="status" aria-live="polite" hidden></p>
+      <p id="spotifyLogin" hidden><a id="spotifyLink" target="_blank" rel="noopener noreferrer">Ouvrir la connexion Spotify</a></p>
+    </section>
+  </div>
+
+  <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <section aria-labelledby="h-tabs">
+      <h2 id="h-tabs">Onglets</h2>
+      <label class="check"><input type="checkbox" id="spotify_visible" data-set="spotify_visible"> Afficher l’onglet Spotify</label>
+      <p class="note">Masquer Spotify met aussi son suivi en pause. La connexion et les réglages restent enregistrés.</p>
+    </section>
   <section aria-labelledby="h-display">
     <h2 id="h-display">Display</h2>
     <div class="field">
@@ -651,7 +844,7 @@ HTML_PAGE = r"""<!doctype html>
     <div class="field">
       <span class="lbl">Orientation</span>
       <div class="seg" role="group" aria-label="Orientation">
-        <button data-o="0">0°</button><button data-o="1">90°</button><button data-o="2">180°</button><button data-o="3">270°</button>
+        <button data-o="0">0°</button><button data-o="2">180°</button>
       </div>
     </div>
   </section>
@@ -670,11 +863,38 @@ HTML_PAGE = r"""<!doctype html>
     <label class="check"><input type="checkbox" id="reset_anim" data-set="reset_anim"> Flash when the 5-hour window resets</label>
     <label class="check"><input type="checkbox" id="increase_anim" data-set="increase_anim"> Animate the bar when usage goes up</label>
   </section>
+  </div>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
 const $ = s => document.querySelector(s);
 let state = null, rev = -1, toastTimer;
+let activeTab = ['spotify', 'settings'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'meter';
+function selectTab(name, focus = false) {
+  if (name === 'spotify' && state && !state.spotify_visible) name = 'meter';
+  activeTab = name;
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    const selected = button.dataset.tab === name;
+    button.setAttribute('aria-selected', selected);
+    button.tabIndex = selected ? 0 : -1;
+    $('#panel-' + button.dataset.tab).hidden = !selected;
+    if (selected && focus) button.focus();
+  });
+}
+document.querySelectorAll('[data-tab]').forEach(button => {
+  button.addEventListener('click', () => selectTab(button.dataset.tab));
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...document.querySelectorAll('[data-tab]')].filter(b => !b.hidden);
+    const index = buttons.indexOf(button);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+    selectTab(buttons[next].dataset.tab, true);
+  });
+});
+selectTab(activeTab);
+const unit = name => name === 'brightness' ? '%' : name === 'spotify_speed' ? ' px/s' : ' s';
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -687,7 +907,10 @@ async function api(path, body) {
     const j = await r.json();
     if (!j.ok) toast(j.error || 'Something went wrong');
     return j;
-  } catch (e) { toast('The meter is not responding'); return {ok:false}; }
+  } catch (e) {
+    const error = 'The meter is not responding. Check PowerShell and start a new connection.';
+    toast(error); return {ok:false, error};
+  }
 }
 const set = (name, value) => api('/api/set', {name, value}).then(load);
 const ago = t => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? 'just now' : s < 3600 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago'; };
@@ -722,14 +945,31 @@ function render(s) {
   $('#adminField').hidden = !s.admin_required;
 
   $('#devName').textContent = s.device.address ? s.device.address + (s.device.connected ? ' (connected)' : ' (not connected)') : 'No display selected';
-  for (const k of ['brightness', 'alternate', 'refresh'])
+  for (const k of ['brightness', 'alternate', 'refresh', 'spotify_hold', 'spotify_speed'])
     if (document.activeElement !== $('#' + k)) $('#' + k).value = s[k];
   $('#brightnessOut').textContent = s.brightness + '%';
   $('#alternateOut').textContent = s.alternate + ' s';
   $('#refreshOut').textContent = s.refresh + ' s';
   $('#refreshNote').hidden = !(a.mode === 'oauth' && s.refresh < 60);
-  for (const k of ['power', 'reset_anim', 'increase_anim']) $('#' + k).checked = s[k];
+  for (const k of ['power', 'reset_anim', 'increase_anim', 'spotify_visible', 'spotify_enabled', 'spotify_artist']) $('#' + k).checked = s[k];
   document.querySelectorAll('[data-o]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.o === s.orientation));
+  $('#tab-spotify').hidden = !s.spotify_visible;
+  if (!s.spotify_visible && activeTab === 'spotify') selectTab('meter', true);
+  $('#spotify_holdOut').textContent = s.spotify_hold + ' s';
+  $('#spotify_speedOut').textContent = s.spotify_speed + ' px/s';
+  const sp = s.spotify;
+  $('#spotifyRedirect').textContent = sp.redirect_uri;
+  if (!$('#spotifyClientId').value && sp.client_id) $('#spotifyClientId').value = sp.client_id;
+  $('#disconnectSpotify').hidden = !sp.connected;
+  $('#spotifyStatus').textContent = sp.error || (!sp.connected ? 'Spotify non connecté.'
+    : !s.spotify_visible || !s.spotify_enabled ? 'Spotify connecté · affichage en pause.'
+    : sp.is_playing ? 'Spotify connecté · lecture en cours.' : 'Spotify connecté · en attente de musique.');
+  $('#spotifyStatus').className = 'note' + (sp.error ? ' bad' : '');
+  $('#spotifyTrack').hidden = !sp.title;
+  $('#spotifyTitle').textContent = sp.title;
+  $('#spotifyArtist').textContent = sp.artist;
+  $('#spotifyPlayback').textContent = sp.is_playing ? 'En cours de lecture' : 'En pause';
+
 }
 async function load() {
   try { render(await (await fetch('/api/state')).json()); }
@@ -737,7 +977,7 @@ async function load() {
 }
 
 document.querySelectorAll('input[type=range][data-set]').forEach(el => {
-  el.addEventListener('input', () => $('#' + el.id + 'Out').textContent = el.value + (el.id === 'brightness' ? '%' : ' s'));
+  el.addEventListener('input', () => $('#' + el.id + 'Out').textContent = el.value + unit(el.id));
   el.addEventListener('change', () => set(el.dataset.set, +el.value));
 });
 document.querySelectorAll('input[type=checkbox][data-set]').forEach(el =>
@@ -747,6 +987,51 @@ document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click'
   if (b.dataset.mode === state.auth.mode) return;
   if ((await api('/api/auth', {mode: b.dataset.mode})).ok) { toast('Sign-in method changed'); load(); }
 }));
+let oauthFlowId = null;
+function oauthResult(message, failed = false) {
+  const el = $('#oauthResult');
+  el.textContent = message; el.hidden = false;
+  el.className = failed ? 'note bad' : 'note';
+}
+function oauthCooldown(seconds) {
+  if (!seconds) return;
+  $('#startOauth').disabled = true;
+  setTimeout(() => { $('#startOauth').disabled = false; }, seconds * 1000);
+}
+$('#startOauth').addEventListener('click', async () => {
+  const btn = $('#startOauth'); btn.disabled = true;
+  oauthResult('Preparing the connection…');
+  const j = await api('/api/oauth/start', {});
+  btn.disabled = false;
+  if (j.ok) {
+    oauthFlowId = j.flow_id;
+    $('#oauthCode').value = '';
+    $('#oauthLink').href = j.url;
+    $('#oauthFlow').hidden = false;
+    $('#oauthLink').focus();
+    oauthResult('Open Claude sign-in, then paste the code below.');
+  } else {
+    oauthResult(j.error || 'Could not start the connection.', true);
+    oauthCooldown(j.retry_after);
+  }
+});
+$('#finishOauth').addEventListener('click', async () => {
+  const code = $('#oauthCode').value.trim();
+  if (!oauthFlowId || !code) { oauthResult('Start a connection and paste the code from Claude.', true); return; }
+  const btn = $('#finishOauth'); btn.disabled = true; $('#startOauth').disabled = true;
+  btn.textContent = 'Connecting…';
+  oauthResult('Validating the code with Claude… This can take up to a minute.');
+  const j = await api('/api/oauth/complete', {flow_id: oauthFlowId, code});
+  btn.disabled = false; $('#startOauth').disabled = false;
+  btn.textContent = 'Complete connection';
+  $('#oauthCode').value = ''; oauthFlowId = null; $('#oauthFlow').hidden = true;
+  if (j.ok) {
+    oauthResult('Connection saved. Checking usage…'); load();
+  } else {
+    oauthResult((j.error || 'Connection failed.') + (j.retry_after ? '' : ' Click Connect with Claude to get a new code.'), true);
+    oauthCooldown(j.retry_after);
+  }
+});
 $('#saveOauth').addEventListener('click', async () => {
   const j = await api('/api/auth', {mode:'oauth', credentials_json: $('#credsJson').value.trim()});
   if (j.ok) { $('#credsJson').value = ''; toast('Credentials saved'); load(); }
@@ -772,14 +1057,41 @@ $('#scan').addEventListener('click', async () => {
     li.append(b); ul.append(li);
   }
 });
+$('#connectSpotify').addEventListener('click', async () => {
+  const button = $('#connectSpotify'); button.disabled = true;
+  const result = await api('/api/spotify/start', {client_id: $('#spotifyClientId').value.trim()});
+  button.disabled = false;
+  $('#spotifyResult').hidden = false;
+  $('#spotifyResult').textContent = result.ok ? 'Ouvre le lien ci-dessous et autorise Spotify. Le retour au panneau est automatique.' : result.error;
+  $('#spotifyResult').className = 'note' + (result.ok ? '' : ' bad');
+  $('#spotifyLogin').hidden = !result.ok;
+  if (result.ok) { $('#spotifyLink').href = result.url; $('#spotifyLink').focus(); }
+});
+$('#disconnectSpotify').addEventListener('click', async () => {
+  if ((await api('/api/spotify/disconnect', {})).ok) {
+    $('#spotifyLogin').hidden = true; $('#spotifyResult').hidden = true; load();
+  }
+});
 load(); setInterval(load, 3000);
 </script>
 </body>
 </html>"""
 
 
-def make_app(display, st):
+def make_app(display, st, spotify=None):
     app = web.Application()
+    spotify = spotify or SpotifyClient(os.path.join(BASE_DIR, '.spotify-oauth.json'), WEB_PORT)
+    pending_oauth = {}
+    oauth_retry_at = 0
+    oauth_server_delay = False
+
+    def oauth_limited(seconds):
+        reason = ("Claude supplied a retry delay." if oauth_server_delay else
+                  "Claude supplied no usable retry delay; this is a local precaution.")
+        return web.json_response({
+            "ok": False, "retry_after": seconds,
+            "error": f"Claude refused the OAuth request (HTTP 429). {reason} Wait at least {seconds}s before requesting a new code. This does not guarantee the next attempt will succeed.",
+        }, status=429, headers={"Retry-After": str(seconds)})
 
     def denied(data):
         return bool(ADMIN_TOKEN) and str(data.get("token", "")) != ADMIN_TOKEN
@@ -797,8 +1109,15 @@ def make_app(display, st):
             "alternate": st.alternate, "refresh": st.refresh,
             "reset_anim": st.reset_anim, "increase_anim": st.increase_anim,
             "preview_rev": st.preview_rev,
+            "spotify_visible": st.spotify_visible, "spotify_enabled": st.spotify_enabled,
+            "spotify_hold": st.spotify_hold, "spotify_speed": st.spotify_speed,
+            "spotify_artist": st.spotify_artist,
+            "spotify": {**spotify.status(), "error": st.spotify_error,
+                        "title": (st.spotify_track or {}).get('title', ''),
+                        "artist": (st.spotify_track or {}).get('artist', ''),
+                        "is_playing": (st.spotify_track or {}).get('is_playing', False)},
             "admin_required": bool(ADMIN_TOKEN),
-            "device": {"address": display.address, "connected": display.client is not None},
+            "device": {"address": display.address, "connected": display.connected},
             "auth": {
                 "mode": AUTH["mode"], "status": st.status,
                 "last_ok": st.last_ok, "last_error": st.last_error,
@@ -825,6 +1144,10 @@ def make_app(display, st):
         setattr(st, name, value)
         if env_key:
             persist_env({env_key: int(value) if isinstance(value, bool) else value})
+        if name.startswith('spotify_'):
+            if not st.spotify_visible or not st.spotify_enabled:
+                st.spotify_track = None
+            st.redraw = True
         if not display.address:
             st.redraw = True
             return web.json_response({"ok": True})
@@ -840,6 +1163,51 @@ def make_app(display, st):
             return fail(f"saved, but the display did not respond: {e}", 502)
         return web.json_response({"ok": True})
 
+    async def api_oauth_start(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        if time.monotonic() < oauth_retry_at:
+            return oauth_limited(max(1, int(oauth_retry_at - time.monotonic()) + 1))
+        for key, flow in list(pending_oauth.items()):
+            if flow["expires_at"] <= time.monotonic():
+                del pending_oauth[key]
+        if len(pending_oauth) >= 16:
+            return fail("Too many pending connections. Wait 10 minutes and retry.", 429)
+        flow, url = begin_oauth_login()
+        flow_id = secrets.token_urlsafe(32)
+        pending_oauth[flow_id] = flow
+        return web.json_response({"ok": True, "flow_id": flow_id, "url": url},
+                                 headers={"Cache-Control": "no-store"})
+
+    async def api_oauth_complete(request):
+        nonlocal oauth_retry_at, oauth_server_delay
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        if time.monotonic() < oauth_retry_at:
+            return oauth_limited(max(1, int(oauth_retry_at - time.monotonic()) + 1))
+        flow = pending_oauth.pop(str(data.get("flow_id", "")), None)
+        if flow is None:
+            return fail("Connection not found or already used. Start again.")
+        try:
+            await asyncio.to_thread(finish_oauth_login, flow, data.get("code") or "")
+        except RateLimited as e:
+            oauth_retry_at = time.monotonic() + e.retry_after
+            oauth_server_delay = e.server_delay
+            print(f"OAuth code exchange: HTTP 429; next attempt in at least {e.retry_after}s")
+            return oauth_limited(e.retry_after)
+        except ValueError as e:
+            return fail(str(e))
+        except requests.RequestException:
+            return fail("Cannot reach Claude. Start a new connection and try again.", 502)
+        except OSError:
+            return fail("Cannot save the connection. Check the meter folder permissions.", 500)
+        AUTH["mode"] = "oauth"
+        st.last_ok, st.last_error, st.status = None, "", None
+        st.force_refetch = True
+        return web.json_response({"ok": True})
+
     async def api_auth(request):
         data = await request.json()
         if denied(data):
@@ -849,7 +1217,7 @@ def make_app(display, st):
             return fail("unknown sign-in method")
         try:
             if data.get("credentials_json"):
-                save_oauth_json(data["credentials_json"])
+                await asyncio.to_thread(save_oauth_json, data["credentials_json"])
             if mode == "session":
                 updates = {}
                 for field, key, env in (("session_key", "key", "CLAUDE_SESSION_KEY"),
@@ -895,14 +1263,49 @@ def make_app(display, st):
         st.redraw = True
         return web.json_response({"ok": True})
 
+    async def api_spotify_start(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        try:
+            url = await asyncio.to_thread(spotify.begin, data.get('client_id', ''))
+            return web.json_response({'ok': True, 'url': url}, headers={'Cache-Control': 'no-store'})
+        except SpotifyError as error:
+            return fail(str(error))
+
+    async def spotify_callback(request):
+        try:
+            await asyncio.to_thread(spotify.finish, request.query.get('state', ''),
+                                    request.query.get('code', ''), bool(request.query.get('error')))
+            st.spotify_error = ''
+        except SpotifyError as error:
+            st.spotify_error = str(error)
+        except (requests.RequestException, OSError, ValueError):
+            st.spotify_error = 'Connexion Spotify impossible. Réessaie depuis le panneau.'
+        # Redirect immediately so the authorization code does not remain in the UI.
+        raise web.HTTPFound('/#spotify', headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+
+    async def api_spotify_disconnect(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        await asyncio.to_thread(spotify.disconnect)
+        st.spotify_track, st.spotify_error, st.redraw = None, '', True
+        return web.json_response({'ok': True})
+
     app.add_routes([
         web.get("/", index),
         web.get("/api/state", api_state),
         web.get("/api/preview.png", api_preview),
         web.post("/api/set", api_set),
         web.post("/api/auth", api_auth),
+        web.post("/api/oauth/start", api_oauth_start),
+        web.post("/api/oauth/complete", api_oauth_complete),
         web.post("/api/scan", api_scan),
         web.post("/api/device", api_device),
+        web.post('/api/spotify/start', api_spotify_start),
+        web.post('/api/spotify/disconnect', api_spotify_disconnect),
+        web.get('/spotify/callback', spotify_callback),
     ])
     return app
 
@@ -949,9 +1352,11 @@ async def play_increase_animation(display, st, old_val, new_val):
 
 async def display_loop(display, st):
     last_fetch, prev_session, last_sig = 0.0, None, None
+    next_display_try = 0.0
     mode, reset_until = "pct", 0.0
     next_reset_at = time.monotonic() + st.alternate
     fails, next_try = 0, 0.0
+    spotify_view = SpotifyView()
 
     while True:
         # --- fetch usage ---
@@ -998,49 +1403,72 @@ async def display_loop(display, st):
             mode, next_reset_at = "pct", now + st.alternate
 
         # --- redraw only when the picture changes ---
+        if display.address and not display.connected and time.monotonic() >= next_display_try:
+            last_sig = None
         if st.status:
             top, color = st.status, RED
         else:
             top, color = (st.reset if mode == "reset" else f"{int(round(st.session))}%"), WHITE
         sig = (top, int(round(st.session)), int(round(st.weekly)))
+        spotify_frame = spotify_view.frame(st.spotify_track, now,
+            st.spotify_visible and st.spotify_enabled and st.power,
+            st.spotify_hold, st.spotify_speed, st.spotify_artist)
+        if spotify_frame is not None:
+            sig = ('spotify', spotify_view.last_id, int(now * 10))
         if st.redraw:
             st.redraw, last_sig = False, None
         if sig != last_sig:
-            img = render(st.session, st.weekly, top, color)
+            img = spotify_frame if spotify_frame is not None else render(st.session, st.weekly, top, color)
             buf = io.BytesIO()
             img.save(buf, "PNG")
             st.preview, st.preview_rev = buf.getvalue(), st.preview_rev + 1
-            if st.power and display.address:
+            if display.address:
                 try:
-                    await display.send_image(save_frame(img))
-                    last_sig = sig
+                    if time.monotonic() >= next_display_try:
+                        if st.power:
+                            await display.send_image(save_frame(img))
+                        else:
+                            await display.set_power(False)
+                        last_sig = sig
                 except Exception as e:
+                    next_display_try = time.monotonic() + 10
                     print("Display send error:", e)
             else:
                 last_sig = sig
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1 if spotify_frame is not None else 1)
 
 
 async def main():
     st = State()
     display = LedDisplay(os.getenv("LED_ADDRESS", "").strip())
+    spotify = SpotifyClient(os.path.join(BASE_DIR, '.spotify-oauth.json'), WEB_PORT)
 
     async def on_connect(client):
         await client.set_brightness(st.brightness)
         await client.set_orientation(st.orientation)
+        await client.set_power(st.power)
     display.on_connect = on_connect
 
     # Web panel first: it works even when the display is off or not chosen yet.
-    runner = web.AppRunner(make_app(display, st))
+    runner = web.AppRunner(make_app(display, st, spotify))
     await runner.setup()
     await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
+    if env_bool("LED_OPEN_BROWSER", False):
+        import webbrowser
+        try:
+            await asyncio.to_thread(webbrowser.open, f"http://localhost:{WEB_PORT}")
+        except Exception:
+            print(f"Open the panel manually: http://localhost:{WEB_PORT}")
     print(f"Web panel: http://{MDNS_NAME}.local:{WEB_PORT}  (port {WEB_PORT} on this device's IP)")
     if not display.address:
         print("No display selected yet: open the web panel and use 'Find displays'.")
+    spotify_task = asyncio.create_task(poll_spotify(spotify, st))
     try:
         await display_loop(display, st)
     finally:
+        spotify_task.cancel()
+        await asyncio.gather(spotify_task, return_exceptions=True)
         await runner.cleanup()
         await display.close()
 
