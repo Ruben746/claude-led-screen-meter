@@ -48,6 +48,16 @@ Le Pi garde son propre nom d'hôte. Pour un autre nom : `LED_MDNS_NAME=bureau-me
 
 Ouvre ensuite le panneau, clique sur **Find displays**, choisis ton écran, puis connecte le compte Claude.
 
+### Lancement rapide sous Windows
+
+Pour une installation durable, double-clique sur **Installer-Windows.bat**. L'application est installée dans `Documents/LED Meter`, avec un raccourci sur le Bureau et un démarrage silencieux à l'ouverture de ta session Windows. Aucun droit administrateur n'est nécessaire. Connecte ton compte depuis cette installation une première fois ; ses identifiants restent séparés de ceux d'autres copies.
+
+Le raccourci du Bureau ouvre le panneau sans lancer une seconde instance. Les erreurs sont enregistrées dans `meter.log` dans le dossier d'installation. Pour désactiver le démarrage automatique, ouvre `shell:startup` depuis **Win+R** et retire le raccourci **LED Meter**. Une réinstallation conserve les réglages et la connexion existants.
+
+Double-clique sur **Lancer.bat**. Python 3 doit être installé. Au premier lancement, le script prépare l'environnement et installe les dépendances ; les lancements suivants les réutilisent. Il conserve le fichier `.env` existant et ouvre le panneau dans le navigateur quand le serveur est prêt.
+
+Garde la fenêtre ouverte pendant l'utilisation. Ferme-la ou utilise **Ctrl+C** pour arrêter le compteur. Aucun écran LED n'est nécessaire pour tester le panneau.
+
 ### Connexion au compte Claude
 
 Deux méthodes, à choisir dans le panneau.
@@ -139,6 +149,14 @@ The installer:
 The Pi keeps its own hostname. For another name: `LED_MDNS_NAME=desk-meter ./install.sh`.
 
 Then open the panel, click **Find displays**, pick your display and connect your Claude account.
+
+### Quick start on Windows
+
+For a permanent installation, double-click **Installer-Windows.bat**. It installs into `Documents/LED Meter`, adds a desktop shortcut and starts silently at Windows sign-in without administrator rights. Connect your account once in this installation. Reinstalling preserves its settings and credentials.
+
+The desktop shortcut opens the panel without a second instance. Background errors go to `meter.log` in the installation folder. To disable automatic startup, open `shell:startup` with **Win+R** and remove **LED Meter**.
+
+Double-click **Lancer.bat** with Python 3 installed. The launcher prepares the environment and installs dependencies when needed, preserves an existing `.env`, and opens the panel once the server is ready. Keep its window open; close it or press **Ctrl+C** to stop. You can test the panel without an LED display.
 
 ### Signing in to Claude
 

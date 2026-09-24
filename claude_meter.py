@@ -1191,6 +1191,12 @@ async def main():
     runner = web.AppRunner(make_app(display, st))
     await runner.setup()
     await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
+    if env_bool("LED_OPEN_BROWSER", False):
+        import webbrowser
+        try:
+            await asyncio.to_thread(webbrowser.open, f"http://localhost:{WEB_PORT}")
+        except Exception:
+            print(f"Open the panel manually: http://localhost:{WEB_PORT}")
     print(f"Web panel: http://{MDNS_NAME}.local:{WEB_PORT}  (port {WEB_PORT} on this device's IP)")
     if not display.address:
         print("No display selected yet: open the web panel and use 'Find displays'.")
