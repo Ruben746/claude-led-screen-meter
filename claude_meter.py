@@ -423,10 +423,10 @@ def percentage_color(value):
 
 
 def draw_bar(draw, y, value, height=3):
-    """Each column takes the gradient colour of its position; unfilled part is dimmed."""
+    """Use one usage-dependent colour across the bar; dim the unfilled part."""
     filled = round(96 * max(0, min(100, value)) / 100)
+    base = percentage_color(value)
     for x in range(96):
-        base = percentage_color(x / 95 * 100)
         col = base if x < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
         for yy in range(height):
             draw.point((x, y + yy), fill=col)
