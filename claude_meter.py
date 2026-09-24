@@ -665,6 +665,7 @@ HTML_PAGE = r"""<!doctype html>
     <div id="pane-oauth" hidden>
       <p class="note" id="oauthState"></p>
       <p class="row"><button id="startOauth" class="primary">Connect with Claude</button></p>
+      <p class="note" id="oauthResult" role="status" aria-live="polite" hidden></p>
       <div id="oauthFlow" hidden>
         <ol>
           <li><a id="oauthLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a> and authorize the connection.</li>
@@ -764,7 +765,10 @@ async function api(path, body) {
     const j = await r.json();
     if (!j.ok) toast(j.error || 'Something went wrong');
     return j;
-  } catch (e) { toast('The meter is not responding'); return {ok:false}; }
+  } catch (e) {
+    const error = 'The meter is not responding. Check PowerShell and start a new connection.';
+    toast(error); return {ok:false, error};
+  }
 }
 const set = (name, value) => api('/api/set', {name, value}).then(load);
 const ago = t => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? 'just now' : s < 3600 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago'; };
@@ -825,8 +829,14 @@ document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click'
   if ((await api('/api/auth', {mode: b.dataset.mode})).ok) { toast('Sign-in method changed'); load(); }
 }));
 let oauthFlowId = null;
+function oauthResult(message, failed = false) {
+  const el = $('#oauthResult');
+  el.textContent = message; el.hidden = false;
+  el.className = failed ? 'note bad' : 'note';
+}
 $('#startOauth').addEventListener('click', async () => {
   const btn = $('#startOauth'); btn.disabled = true;
+  oauthResult('Preparing the connection…');
   const j = await api('/api/oauth/start', {});
   btn.disabled = false;
   if (j.ok) {
@@ -835,16 +845,24 @@ $('#startOauth').addEventListener('click', async () => {
     $('#oauthLink').href = j.url;
     $('#oauthFlow').hidden = false;
     $('#oauthLink').focus();
-  }
+    oauthResult('Open Claude sign-in, then paste the code below.');
+  } else { oauthResult(j.error || 'Could not start the connection.', true); }
 });
 $('#finishOauth').addEventListener('click', async () => {
   const code = $('#oauthCode').value.trim();
-  if (!oauthFlowId || !code) { toast('Start a connection and paste the code from Claude'); return; }
+  if (!oauthFlowId || !code) { oauthResult('Start a connection and paste the code from Claude.', true); return; }
   const btn = $('#finishOauth'); btn.disabled = true; $('#startOauth').disabled = true;
+  btn.textContent = 'Connecting…';
+  oauthResult('Validating the code with Claude… This can take up to a minute.');
   const j = await api('/api/oauth/complete', {flow_id: oauthFlowId, code});
   btn.disabled = false; $('#startOauth').disabled = false;
+  btn.textContent = 'Complete connection';
   $('#oauthCode').value = ''; oauthFlowId = null; $('#oauthFlow').hidden = true;
-  if (j.ok) { toast('Connected, checking usage…'); load(); }
+  if (j.ok) {
+    oauthResult('Connection saved. Checking usage…'); load();
+  } else {
+    oauthResult((j.error || 'Connection failed.') + ' Click Connect with Claude to get a new code.', true);
+  }
 });
 $('#saveOauth').addEventListener('click', async () => {
   const j = await api('/api/auth', {mode:'oauth', credentials_json: $('#credsJson').value.trim()});
