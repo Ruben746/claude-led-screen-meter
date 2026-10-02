@@ -8,6 +8,10 @@ Your Claude plan usage (5-hour window and weekly limit) on a 96×16 Bluetooth LE
 
 ## Français
 
+### Développé grâce à pypixelcolor
+
+Ce projet utilise [pypixelcolor](https://github.com/lucagoc/pypixelcolor) pour communiquer en Bluetooth Low Energy avec la matrice LED iPixel, envoyer les images et régler l'écran. Merci à [lucagoc](https://github.com/lucagoc) et aux contributeurs de la bibliothèque pour leur travail.
+
 ### Ce que ça fait
 
 L'écran affiche en permanence :
@@ -123,6 +127,10 @@ sudo systemctl restart claude-meter
 ---
 
 ## English
+
+### Built with pypixelcolor
+
+This project uses [pypixelcolor](https://github.com/lucagoc/pypixelcolor) to communicate with the iPixel LED matrix over Bluetooth Low Energy, send images and control display settings. Thanks to [lucagoc](https://github.com/lucagoc) and the library's contributors for their work.
 
 ### What it does
 
