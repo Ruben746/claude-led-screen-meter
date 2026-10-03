@@ -8,6 +8,3 @@ __pycache__/
 *.png
 meter.log
 meter.log.old
-
-.meter-setup-token.json
-.meter-setup-token.json.tmp

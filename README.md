@@ -78,17 +78,11 @@ Garde la fenêtre ouverte pendant l'utilisation. Ferme-la ou utilise **Ctrl+C** 
 
 ### Connexion au compte Claude
 
-Trois méthodes, à choisir dans le panneau.
+Deux méthodes, à choisir dans le panneau.
 
-**Claude setup-token** (alternative à la connexion OAuth intégrée).
+**Claude OAuth** (connexion par code).
 
-1. Sur un ordinateur équipé de Claude Code, lance `claude setup-token` et termine la connexion.
-2. Dans le panneau du compteur, choisis **Claude setup-token**.
-3. Colle uniquement le jeton généré dans **Setup token**, puis clique sur **Connect with token**.
-
-Le compteur vérifie l'accès aux quotas avant d'enregistrer le jeton dans `.meter-setup-token.json` (exclu de Git), séparément des autres connexions. Aucun fichier Claude Code n'est modifié. Ce jeton n'est pas renouvelé automatiquement : régénère-le s'il expire ou est révoqué. Les tokens `setup-token` peuvent manquer de la permission `user:profile` nécessaire aux quotas ([problème signalé dans Claude Code](https://github.com/anthropics/claude-code/issues/24200)). Un HTTP 403 ne signifie pas que le token a expiré : le régénérer ne rajoute pas cette permission. Utilise alors Claude OAuth ou une nouvelle session claude.ai. La lecture reste limitée à une fois par minute. Voir la [documentation Claude Code](https://code.claude.com/docs/en/authentication).
-
-**Claude OAuth** (connexion par code ; des erreurs HTTP 429 persistantes restent possibles).
+L’échange et le renouvellement des jetons identifient désormais le compteur avec son propre User-Agent, au lieu de celui d’une ancienne version de Claude Code qui provoquait des réponses 429 avant validation. Les véritables limites de débit restent respectées.
 
 1. Dans le panneau, choisis **Claude OAuth**, puis **Connect with Claude**.
 2. Clique sur **Open Claude sign-in**, connecte-toi sur Claude et autorise la connexion.
@@ -118,7 +112,7 @@ Dans ce mode, l'usage est lu au plus une fois par minute.
 
 ### Avertissement
 
-Projet personnel, **non affilié à Anthropic et non approuvé par Anthropic**. Il repose sur des endpoints non documentés, qui peuvent changer ou disparaître à tout moment. Les conditions d'Anthropic réservent les jetons OAuth des abonnements Claude à Claude Code et Claude.ai, et encadrent l'accès automatisé à leurs services. Les méthodes de connexion sortent donc de ce cadre. Tu les utilises sous ta propre responsabilité, avec ton propre compte.
+Projet personnel, **non affilié à Anthropic et non approuvé par Anthropic**. Il repose sur des endpoints non documentés, qui peuvent changer ou disparaître à tout moment. Les conditions d'Anthropic réservent les jetons OAuth des abonnements Claude à Claude Code et Claude.ai, et encadrent l'accès automatisé à leurs services. Les deux méthodes de connexion sortent donc de ce cadre. Tu les utilises sous ta propre responsabilité, avec ton propre compte.
 
 Le panneau n'a pas d'authentification par défaut : garde-le sur ton réseau local. `LED_ADMIN_TOKEN` exige un code pour modifier le compte ou l'écran.
 
@@ -202,17 +196,11 @@ Double-click **Lancer.bat** with Python 3 installed. The launcher prepares the e
 
 ### Signing in to Claude
 
-Three methods, chosen in the panel.
+Two methods, chosen in the panel.
 
-**Claude setup-token** (alternative to the built-in OAuth flow).
+**Claude OAuth** (copy-and-paste code flow).
 
-1. On a computer with Claude Code installed, run `claude setup-token` and complete sign-in.
-2. Select **Claude setup-token** in the meter panel.
-3. Paste only the generated token into **Setup token**, then click **Connect with token**.
-
-The meter checks usage access before saving it to `.meter-setup-token.json` (Git-ignored), separate from other credentials. Claude Code files are unchanged. This token cannot refresh automatically: generate another when it expires or is revoked. Setup tokens may lack the `user:profile` scope required for usage ([Claude Code issue](https://github.com/anthropics/claude-code/issues/24200)). HTTP 403 does not imply expiry: regenerating the token does not add the missing scope. Use Claude OAuth or a fresh claude.ai session instead. Usage polling remains limited to once a minute. See the [Claude Code documentation](https://code.claude.com/docs/en/authentication).
-
-**Claude OAuth** (copy-and-paste code flow; persistent HTTP 429 errors remain possible).
+Token exchange and refresh now identify the meter with its own User-Agent instead of an old Claude Code identity that triggered HTTP 429 before validation. Genuine rate limits are still respected.
 
 1. Select **Claude OAuth**, then **Connect with Claude** in the panel.
 2. Follow **Open Claude sign-in**, sign in to Claude and authorize the connection.
@@ -242,7 +230,7 @@ In this mode usage is read at most once a minute.
 
 ### Disclaimer
 
-Personal project, **not affiliated with or endorsed by Anthropic**. It relies on undocumented endpoints that can change or disappear at any time. Anthropic's terms restrict OAuth tokens from Claude subscriptions to Claude Code and Claude.ai, and limit automated access to their services, so these sign-in methods fall outside what Anthropic permits. Use them at your own risk, with your own account.
+Personal project, **not affiliated with or endorsed by Anthropic**. It relies on undocumented endpoints that can change or disappear at any time. Anthropic's terms restrict OAuth tokens from Claude subscriptions to Claude Code and Claude.ai, and limit automated access to their services, so both sign-in methods fall outside what Anthropic permits. Use them at your own risk, with your own account.
 
 The panel has no authentication by default: keep it on your local network. `LED_ADMIN_TOKEN` requires a code to change the account or the display.
 

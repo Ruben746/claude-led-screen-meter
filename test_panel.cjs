@@ -5,8 +5,7 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync('claude_meter.py', 'utf8');
 const script = source.split('<script>')[1].split('</script>')[0];
 const elements = new Map();
-let limitedStart = false, limitedComplete = false, setupOk = false;
-let submitted;
+let limitedStart = false, limitedComplete = false;
 const timers = [];
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
@@ -22,8 +21,7 @@ function element(id) {
 const context = {
   location: {hash: ''},
   document: { querySelector: element, querySelectorAll: selector => selector === '[data-tab]' ? tabs : [] },
-  fetch: async (path, options) => ({ json: async () => {
-    if (path === '/api/auth') { submitted = JSON.parse(options.body); return setupOk ? {ok:true} : {ok:false,error:'Setup token refused (HTTP 403).'}; }
+  fetch: async (path) => ({ json: async () => {
     if ((path === '/api/oauth/start' && limitedStart) ||
         (path === '/api/oauth/complete' && limitedComplete)) {
       return {ok: false, error: 'HTTP 429: wait before retrying.', retry_after: 300};
@@ -40,19 +38,6 @@ const tabs = ['meter', 'spotify', 'settings'].map(name => {
 vm.createContext(context);
 vm.runInContext(script, context);
 (async () => {
-  element('#setupToken').value = 'sk-ant-oat01-test';
-  await element('#saveSetupToken').click();
-  assert.equal(submitted.mode, 'setup-token');
-  assert.equal(submitted.setup_token, 'sk-ant-oat01-test');
-  assert.equal(element('#setupToken').value, '');
-  assert.match(element('#setupTokenResult').textContent, /HTTP 403/);
-  assert.equal(element('#setupTokenResult').hidden, false);
-  assert.equal(element('#saveSetupToken').disabled, false);
-  setupOk = true;
-  element('#setupToken').value = 'sk-ant-oat01-replacement';
-  await element('#saveSetupToken').click();
-  assert.match(element('#setupTokenResult').textContent, /Token saved/);
-  assert.equal(element('#setupToken').value, '');
   await element('#startOauth').click();
   element('#oauthCode').value = 'test-code';
   await element('#finishOauth').click();

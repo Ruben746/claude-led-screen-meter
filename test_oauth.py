@@ -48,6 +48,7 @@ class OAuthTests(unittest.TestCase):
         with patch.object(meter.requests, 'post', return_value=self.response(
                 access_token='access', refresh_token='refresh', expires_in=3600)) as post:
             meter.finish_oauth_login(flow, 'code#' + query['state'][0])
+        self.assertEqual(post.call_args.kwargs['headers']['User-Agent'], 'claude-led-screen-meter/1.0')
         body = post.call_args.kwargs['json']
         challenge = base64.urlsafe_b64encode(hashlib.sha256(body['code_verifier'].encode()).digest()).rstrip(b'=').decode()
         self.assertEqual(query['code_challenge'], [challenge])
@@ -102,6 +103,7 @@ class OAuthTests(unittest.TestCase):
             self.assertEqual(meter._get_usage_oauth()[0], 12)
             self.assertEqual(get.call_args.kwargs['headers']['Authorization'], 'Bearer fresh')
             self.assertEqual(post.call_count, 1)
+            self.assertEqual(post.call_args.kwargs['headers']['User-Agent'], 'claude-led-screen-meter/1.0')
         with patch.object(meter.requests, 'post', return_value=self.response(access_token='retry', expires_in=3600)), \
                 patch.object(meter.requests, 'get', side_effect=[Mock(status_code=401), self.response()]) as get:
             meter._get_usage_oauth()
