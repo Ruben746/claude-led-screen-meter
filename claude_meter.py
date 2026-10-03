@@ -343,7 +343,17 @@ def _usage_response(r, setup_token=False):
         raise RateLimited(_retry_after(r))
     if r.status_code in (401, 403):
         if setup_token:
-            raise AuthError(f"Setup token refused (HTTP {r.status_code}). Run claude setup-token again; if usage access is denied, use another sign-in method.")
+            if r.status_code == 403:
+                # Only classify known errors; never expose the raw upstream body.
+                try:
+                    error = r.json().get("error", {})
+                    message = error.get("message", "") if isinstance(error, dict) else ""
+                except (ValueError, AttributeError):
+                    message = ""
+                if isinstance(message, str) and "user:profile" in message:
+                    raise AuthError("This token lacks user:profile, required to read usage. claude setup-token tokens may lack this permission; generating another will not add it. Use Claude OAuth or a fresh claude.ai session.")
+                raise AuthError("Usage access denied (HTTP 403). This does not mean the token expired. Setup tokens may lack the required user:profile permission. Use Claude OAuth or a fresh claude.ai session.")
+            raise AuthError("Setup token invalid or expired (HTTP 401). Run claude setup-token again, or use another sign-in method.")
         raise AuthError(f"usage request refused (HTTP {r.status_code})")
     r.raise_for_status()
     return _parse_usage(r.json())
@@ -769,6 +779,7 @@ HTML_PAGE = r"""<!doctype html>
     <p class="note" id="authNote"></p>
 
     <div id="pane-setup-token" hidden>
+      <p class="note">Compatibility limit: tokens from <code>claude setup-token</code> may lack <code>user:profile</code>, required for usage counters. A new token will not add a missing permission. Use Claude OAuth or a fresh claude.ai session if access is denied.</p>
       <ol>
         <li>On a computer with Claude Code installed, run <code>claude setup-token</code> and follow the sign-in instructions.</li>
         <li>Paste only the generated token below, even if the meter runs on another device.</li>

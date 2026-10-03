@@ -71,3 +71,20 @@ class SetupTokenTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(m.AuthError,'claude setup-token'):
                 m._get_usage_setup_token()
             post.assert_not_called()
+
+    async def test_missing_scope_has_specific_safe_guidance(self):
+        response = Mock(status_code=403, json=lambda: {"error": {"message": "OAuth token does not meet scope requirement user:profile " + TOKEN}})
+        with patch.object(m.requests, 'get', return_value=response):
+            result = await self.submit()
+            body = await result.text()
+            self.assertIn('lacks user:profile', body)
+            self.assertNotIn(TOKEN, body)
+            self.assertNotIn('Run claude setup-token again', body)
+
+    async def test_unknown_forbidden_response_does_not_claim_expiry(self):
+        response = Mock(status_code=403, json=Mock(side_effect=ValueError('not JSON')))
+        with patch.object(m.requests, 'get', return_value=response):
+            result = await self.submit()
+            body = await result.text()
+            self.assertIn('Usage access denied', body)
+            self.assertNotIn('Run claude setup-token again', body)

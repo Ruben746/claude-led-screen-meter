@@ -86,7 +86,7 @@ Trois méthodes, à choisir dans le panneau.
 2. Dans le panneau du compteur, choisis **Claude setup-token**.
 3. Colle uniquement le jeton généré dans **Setup token**, puis clique sur **Connect with token**.
 
-Le compteur vérifie l'accès aux quotas avant d'enregistrer le jeton dans `.meter-setup-token.json` (exclu de Git), séparément des autres connexions. Aucun fichier Claude Code n'est modifié. Ce jeton n'est pas renouvelé automatiquement : régénère-le s'il expire ou est révoqué. Un jeton accepté par Claude Code peut ne pas avoir accès aux quotas ; un refus HTTP 403 reste possible. La lecture reste limitée à une fois par minute. Voir la [documentation Claude Code](https://code.claude.com/docs/en/authentication).
+Le compteur vérifie l'accès aux quotas avant d'enregistrer le jeton dans `.meter-setup-token.json` (exclu de Git), séparément des autres connexions. Aucun fichier Claude Code n'est modifié. Ce jeton n'est pas renouvelé automatiquement : régénère-le s'il expire ou est révoqué. Les tokens `setup-token` peuvent manquer de la permission `user:profile` nécessaire aux quotas ([problème signalé dans Claude Code](https://github.com/anthropics/claude-code/issues/24200)). Un HTTP 403 ne signifie pas que le token a expiré : le régénérer ne rajoute pas cette permission. Utilise alors Claude OAuth ou une nouvelle session claude.ai. La lecture reste limitée à une fois par minute. Voir la [documentation Claude Code](https://code.claude.com/docs/en/authentication).
 
 **Claude OAuth** (connexion par code ; des erreurs HTTP 429 persistantes restent possibles).
 
@@ -210,7 +210,7 @@ Three methods, chosen in the panel.
 2. Select **Claude setup-token** in the meter panel.
 3. Paste only the generated token into **Setup token**, then click **Connect with token**.
 
-The meter checks usage access before saving it to `.meter-setup-token.json` (Git-ignored), separate from other credentials. Claude Code files are unchanged. This token cannot refresh automatically: generate another when it expires or is revoked. A token accepted by Claude Code may lack usage access (HTTP 403). Usage polling remains limited to once a minute. See the [Claude Code documentation](https://code.claude.com/docs/en/authentication).
+The meter checks usage access before saving it to `.meter-setup-token.json` (Git-ignored), separate from other credentials. Claude Code files are unchanged. This token cannot refresh automatically: generate another when it expires or is revoked. Setup tokens may lack the `user:profile` scope required for usage ([Claude Code issue](https://github.com/anthropics/claude-code/issues/24200)). HTTP 403 does not imply expiry: regenerating the token does not add the missing scope. Use Claude OAuth or a fresh claude.ai session instead. Usage polling remains limited to once a minute. See the [Claude Code documentation](https://code.claude.com/docs/en/authentication).
 
 **Claude OAuth** (copy-and-paste code flow; persistent HTTP 429 errors remain possible).
 
