@@ -61,6 +61,7 @@ BLE_CONNECT_TIMEOUT = 15
 
 # Independent meter credentials by default; legacy file sharing is opt-in.
 METER_OAUTH_FILE = os.path.join(BASE_DIR, ".meter-oauth.json")
+SETUP_TOKEN_FILE = os.path.join(BASE_DIR, ".meter-setup-token.json")
 OAUTH_FILE = os.path.expanduser(os.getenv("LED_OAUTH_FILE", METER_OAUTH_FILE))
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -82,7 +83,7 @@ SESSION = {
 }
 
 _mode = os.getenv("LED_AUTH_MODE", "oauth").strip().lower()
-AUTH = {"mode": "session" if _mode in ("session", "cookie") else "oauth"}
+AUTH = {"mode": "session" if _mode in ("session", "cookie") else "setup-token" if _mode == "setup-token" else "oauth"}
 
 
 # =========================
@@ -321,24 +322,65 @@ def _get_usage_oauth():
     if int(oauth.get("expiresAt", 0)) - 60_000 < time.time() * 1000:
         oauth = _refresh_oauth(data, oauth)
 
-    def call(token):
-        return requests.get(OAUTH_USAGE_URL, headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": OAUTH_UA,
-            "Content-Type": "application/json",
-        }, timeout=10)
-
-    r = call(oauth["accessToken"])
+    r = _call_usage(oauth["accessToken"])
     if r.status_code == 401:
         oauth = _refresh_oauth(data, oauth)
-        r = call(oauth["accessToken"])
+        r = _call_usage(oauth["accessToken"])
+    return _usage_response(r)
+
+
+def _call_usage(token):
+    return requests.get(OAUTH_USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": OAUTH_UA,
+        "Content-Type": "application/json",
+    }, timeout=10)
+
+
+def _usage_response(r, setup_token=False):
     if r.status_code == 429:
         raise RateLimited(_retry_after(r))
     if r.status_code in (401, 403):
+        if setup_token:
+            raise AuthError(f"Setup token refused (HTTP {r.status_code}). Run claude setup-token again; if usage access is denied, use another sign-in method.")
         raise AuthError(f"usage request refused (HTTP {r.status_code})")
     r.raise_for_status()
     return _parse_usage(r.json())
+
+
+@oauth_locked
+def save_setup_token(raw):
+    token = raw.strip() if isinstance(raw, str) else ""
+    if not token.startswith("sk-ant-oat01-") or len(token) <= len("sk-ant-oat01-") or any(c.isspace() for c in token):
+        raise ValueError("Paste only the token printed by claude setup-token (sk-ant-oat01-...), not an API key or a command.")
+    # Verify access before replacing a working token. Never refresh a setup token.
+    _usage_response(_call_usage(token), setup_token=True)
+    _save_oauth({"accessToken": token}, SETUP_TOKEN_FILE)
+
+
+def _load_setup_token():
+    try:
+        with open(SETUP_TOKEN_FILE) as f:
+            token = json.load(f).get("accessToken")
+        if not isinstance(token, str) or not token:
+            raise ValueError()
+        return token
+    except (OSError, ValueError, AttributeError):
+        raise AuthError("Run claude setup-token and paste the token in the web panel.")
+
+
+@oauth_locked
+def _get_usage_setup_token():
+    return _usage_response(_call_usage(_load_setup_token()), setup_token=True)
+
+
+def setup_token_status():
+    try:
+        _load_setup_token()
+        return {"saved": True}
+    except AuthError:
+        return {"saved": False}
 
 
 def oauth_status():
@@ -394,6 +436,8 @@ def _get_usage_session():
 
 
 def get_usage():
+    if AUTH["mode"] == "setup-token":
+        return _get_usage_setup_token()
     return _get_usage_oauth() if AUTH["mode"] == "oauth" else _get_usage_session()
 
 
@@ -718,10 +762,24 @@ HTML_PAGE = r"""<!doctype html>
   <section aria-labelledby="h-account">
     <h2 id="h-account">Claude account</h2>
     <div class="seg" role="group" aria-label="Sign-in method">
+      <button data-mode="setup-token">Claude setup-token</button>
       <button data-mode="oauth">Claude OAuth</button>
       <button data-mode="session">claude.ai session</button>
     </div>
     <p class="note" id="authNote"></p>
+
+    <div id="pane-setup-token" hidden>
+      <ol>
+        <li>On a computer with Claude Code installed, run <code>claude setup-token</code> and follow the sign-in instructions.</li>
+        <li>Paste only the generated token below, even if the meter runs on another device.</li>
+      </ol>
+      <label for="setupToken">Setup token</label>
+      <input type="password" id="setupToken" autocomplete="off" spellcheck="false">
+      <p class="row"><button id="saveSetupToken" class="primary">Connect with token</button></p>
+      <p class="note" id="setupTokenState"></p>
+      <p class="note" id="setupTokenResult" role="status" aria-live="polite" hidden></p>
+      <p class="note">The token is stored privately on the meter. It cannot renew automatically: generate a new one if it expires or is revoked. Usage access is checked before saving.</p>
+    </div>
 
     <div id="pane-oauth" hidden>
       <p class="note" id="oauthState"></p>
@@ -930,6 +988,8 @@ function render(s) {
   conn.textContent = a.last_ok ? 'Updated ' + ago(a.last_ok) : a.last_error ? 'Not connected' : 'Waiting for data';
 
   document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', b.dataset.mode === a.mode));
+  $('#pane-setup-token').hidden = a.mode !== 'setup-token';
+  $('#setupTokenState').textContent = a.setup_token?.saved ? 'Setup token saved.' : '';
   $('#pane-oauth').hidden = a.mode !== 'oauth';
   $('#pane-session').hidden = a.mode !== 'session';
   const n = $('#authNote');
@@ -950,7 +1010,7 @@ function render(s) {
   $('#brightnessOut').textContent = s.brightness + '%';
   $('#alternateOut').textContent = s.alternate + ' s';
   $('#refreshOut').textContent = s.refresh + ' s';
-  $('#refreshNote').hidden = !(a.mode === 'oauth' && s.refresh < 60);
+  $('#refreshNote').hidden = !(a.mode !== 'session' && s.refresh < 60);
   for (const k of ['power', 'reset_anim', 'increase_anim', 'spotify_visible', 'spotify_enabled', 'spotify_artist']) $('#' + k).checked = s[k];
   document.querySelectorAll('[data-o]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.o === s.orientation));
   $('#tab-spotify').hidden = !s.spotify_visible;
@@ -1031,6 +1091,20 @@ $('#finishOauth').addEventListener('click', async () => {
     oauthResult((j.error || 'Connection failed.') + (j.retry_after ? '' : ' Click Connect with Claude to get a new code.'), true);
     oauthCooldown(j.retry_after);
   }
+});
+$('#saveSetupToken').addEventListener('click', async () => {
+  const result = $('#setupTokenResult');
+  const token = $('#setupToken').value.trim();
+  result.hidden = false;
+  if (!token) { result.textContent = 'Paste the token printed by claude setup-token.'; return; }
+  $('#saveSetupToken').disabled = true;
+  result.textContent = 'Checking usage access…';
+  const j = await api('/api/auth', {mode: 'setup-token', setup_token: token});
+  $('#saveSetupToken').disabled = false;
+  $('#setupToken').value = '';
+  result.className = 'note' + (j.ok ? '' : ' bad');
+  result.textContent = j.ok ? 'Token saved. Checking usage…' : (j.error || 'Connection failed.');
+  if (j.ok) load();
 });
 $('#saveOauth').addEventListener('click', async () => {
   const j = await api('/api/auth', {mode:'oauth', credentials_json: $('#credsJson').value.trim()});
@@ -1122,6 +1196,7 @@ def make_app(display, st, spotify=None):
                 "mode": AUTH["mode"], "status": st.status,
                 "last_ok": st.last_ok, "last_error": st.last_error,
                 "oauth": oauth_status(),
+                "setup_token": setup_token_status(),
                 "session": {"has_key": bool(SESSION["key"]), "has_cf": bool(SESSION["cf"]),
                             "org_name": SESSION["org_name"]},
             },
@@ -1213,9 +1288,11 @@ def make_app(display, st, spotify=None):
         if denied(data):
             return fail("wrong admin code", 403)
         mode = data.get("mode", AUTH["mode"])
-        if mode not in ("oauth", "session"):
+        if mode not in ("oauth", "session", "setup-token"):
             return fail("unknown sign-in method")
         try:
+            if mode == "setup-token" and "setup_token" in data:
+                await asyncio.to_thread(save_setup_token, data["setup_token"])
             if data.get("credentials_json"):
                 await asyncio.to_thread(save_oauth_json, data["credentials_json"])
             if mode == "session":
@@ -1233,6 +1310,12 @@ def make_app(display, st, spotify=None):
                     persist_env(updates)
         except ValueError as e:
             return fail(str(e))
+        except RateLimited as e:
+            return web.json_response({"ok": False, "error": f"Usage rate limited. Retry in {e.retry_after} seconds.", "retry_after": e.retry_after}, status=429)
+        except AuthError as e:
+            return fail(str(e), 401)
+        except (requests.RequestException, OSError):
+            return fail("Could not verify or save the token. Check the connection and try again.", 502)
         AUTH["mode"] = mode
         persist_env({"LED_AUTH_MODE": mode})
         st.last_ok, st.last_error, st.status = None, "", None
@@ -1360,7 +1443,7 @@ async def display_loop(display, st):
 
     while True:
         # --- fetch usage ---
-        interval = max(st.refresh, OAUTH_MIN_REFRESH) if AUTH["mode"] == "oauth" else st.refresh
+        interval = max(st.refresh, OAUTH_MIN_REFRESH) if AUTH["mode"] != "session" else st.refresh
         now = time.monotonic()
         if st.force_refetch:
             next_try = 0.0
