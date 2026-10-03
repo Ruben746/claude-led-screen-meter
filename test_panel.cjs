@@ -38,6 +38,21 @@ const tabs = ['meter', 'spotify', 'settings'].map(name => {
 vm.createContext(context);
 vm.runInContext(script, context);
 (async () => {
+  const status = (auth, age = 12) => {
+    context.statusFixture = {auth: {mode:'oauth',last_ok:1000,last_error:'',...auth}, server_time:1000+age,refresh:15,effective_refresh:60};
+    vm.runInContext('renderUsageStatus(statusFixture)', context);
+    return element('#conn');
+  };
+  assert.equal(status({}).textContent, 'Relevé il y a 12 s');
+  assert.equal(status({}).className, 'ok');
+  assert.equal(status({last_error:'timeout'}).className, 'bad');
+  assert.match(status({last_error:'timeout'}).textContent, /Actualisation en échec/);
+  assert.match(status({}, 95).textContent, /Données anciennes/);
+  assert.equal(status({fetching:true}).className, '');
+  assert.match(status({fetching:true}).textContent, /Vérification/);
+  assert.equal(status({last_ok:null}).textContent, 'Aucune donnée reçue');
+  assert.match(status({}).title, /Intervalle effectif : 60 s/);
+
   await element('#startOauth').click();
   element('#oauthCode').value = 'test-code';
   await element('#finishOauth').click();

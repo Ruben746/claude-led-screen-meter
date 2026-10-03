@@ -566,6 +566,7 @@ class State:
         self.status = None          # AUTH / NET / ERR once failures persist
         self.last_ok = None         # epoch of last successful fetch
         self.last_error = ""
+        self.fetching = False
         self.force_refetch = False
         self.redraw = False
         self.preview = b""
@@ -696,7 +697,7 @@ HTML_PAGE = r"""<!doctype html>
 <main>
   <header>
     <h1>Claude meter</h1>
-    <span id="conn">Loading…</span>
+    <span id="conn" role="status" aria-live="polite">Chargement…</span>
   </header>
 
     <div class="field" id="adminField" hidden>
@@ -919,6 +920,20 @@ const set = (name, value) => api('/api/set', {name, value}).then(load);
 const ago = t => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? 'just now' : s < 3600 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago'; };
 const clock = ms => new Date(ms).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
 
+function renderUsageStatus(s) {
+  const a = s.auth;
+  const conn = $('#conn');
+  const age = a.last_ok == null ? null : Math.max(0, Math.floor((s.server_time ?? Date.now()/1000) - a.last_ok));
+  const duration = age === null ? '' : age < 60 ? age + ' s' : age < 3600 ? Math.floor(age/60) + ' min ' + age%60 + ' s' : Math.floor(age/3600) + ' h ' + Math.floor(age%3600/60) + ' min';
+  const detail = age === null ? 'Aucune donnée reçue' : 'Relevé il y a ' + duration;
+  const interval = s.effective_refresh ?? (a.mode === 'oauth' ? Math.max(60, s.refresh) : s.refresh);
+  const stale = age !== null && age > interval + 30;
+  conn.className = a.last_error || stale ? 'bad' : a.fetching || age === null ? '' : 'ok';
+  conn.textContent = (a.last_error ? 'Actualisation en échec · ' : a.fetching ? 'Vérification… · ' : stale ? 'Données anciennes · ' : '') + detail;
+  conn.title = (age === null ? '' : 'Dernière récupération réussie : ' + new Date(a.last_ok * 1000).toLocaleTimeString() + '. ') +
+    'Intervalle effectif : ' + interval + ' s. ' + (a.last_error || 'Une récupération réussie ne signifie pas que le pourcentage a changé.');
+}
+
 function render(s) {
   state = s;
   const a = s.auth;
@@ -928,9 +943,7 @@ function render(s) {
   if (s.preview_rev !== rev) { rev = s.preview_rev; $('#preview').src = '/api/preview.png?r=' + rev; }
   $('#bezel').classList.toggle('off', !s.power);
 
-  const conn = $('#conn');
-  conn.className = a.last_error && !a.last_ok ? 'bad' : a.last_ok ? (a.status ? 'bad' : 'ok') : '';
-  conn.textContent = a.last_ok ? 'Updated ' + ago(a.last_ok) : a.last_error ? 'Not connected' : 'Waiting for data';
+  renderUsageStatus(s);
 
   document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', b.dataset.mode === a.mode));
   $('#pane-oauth').hidden = a.mode !== 'oauth';
@@ -976,7 +989,7 @@ function render(s) {
 }
 async function load() {
   try { render(await (await fetch('/api/state')).json()); }
-  catch (e) { $('#conn').className = 'bad'; $('#conn').textContent = 'Meter offline'; }
+  catch (e) { $('#conn').className = 'bad'; $('#conn').textContent = 'Compteur injoignable'; $('#conn').title = 'Le panneau ne reçoit plus de réponse du compteur. Les valeurs affichées peuvent être anciennes.'; }
 }
 
 document.querySelectorAll('input[type=range][data-set]').forEach(el => {
@@ -1110,6 +1123,8 @@ def make_app(display, st, spotify=None):
             "session": st.session, "weekly": st.weekly, "reset": st.reset,
             "brightness": st.brightness, "orientation": st.orientation, "power": st.power,
             "alternate": st.alternate, "refresh": st.refresh,
+            "server_time": time.time(),
+            "effective_refresh": max(st.refresh, OAUTH_MIN_REFRESH) if AUTH["mode"] == "oauth" else st.refresh,
             "reset_anim": st.reset_anim, "increase_anim": st.increase_anim,
             "preview_rev": st.preview_rev,
             "spotify_visible": st.spotify_visible, "spotify_enabled": st.spotify_enabled,
@@ -1123,7 +1138,7 @@ def make_app(display, st, spotify=None):
             "device": {"address": display.address, "connected": display.connected},
             "auth": {
                 "mode": AUTH["mode"], "status": st.status,
-                "last_ok": st.last_ok, "last_error": st.last_error,
+                "last_ok": st.last_ok, "last_error": st.last_error, "fetching": st.fetching,
                 "oauth": oauth_status(),
                 "session": {"has_key": bool(SESSION["key"]), "has_cf": bool(SESSION["cf"]),
                             "org_name": SESSION["org_name"]},
@@ -1370,6 +1385,7 @@ async def display_loop(display, st):
         if (st.force_refetch or now - last_fetch >= interval) and now >= next_try:
             st.force_refetch = False
             last_fetch = now
+            st.fetching = True
             try:
                 session, weekly, reset = await asyncio.to_thread(get_usage)
                 st.session, st.weekly, st.reset = session, weekly, reset
@@ -1385,6 +1401,7 @@ async def display_loop(display, st):
                 prev_session = session
                 fails, st.status = 0, None
             except RateLimited as e:
+                st.last_error = f"Claude limite les requêtes. Nouvelle tentative dans au moins {e.retry_after} s."
                 print(f"Rate limited, retrying in {e.retry_after}s")
                 next_try = time.monotonic() + e.retry_after
             except Exception as e:
@@ -1397,6 +1414,8 @@ async def display_loop(display, st):
                 next_try = time.monotonic() + min(300, 20 * fails)   # 20 s, 40 s… capped at 5 min
                 if fails >= 3:
                     st.status = code
+            finally:
+                st.fetching = False
 
         # --- percentage <-> reset time on the top line ---
         now = time.monotonic()
