@@ -1,62 +1,88 @@
-# Claude meter
+# LED Meter — Claude & Codex
 
-[Français](#français) · [English](#english)
+Vos quotas Claude et ChatGPT/Codex sur une matrice LED **96 × 16**, avec un panneau web local, une bascule automatique selon la consommation et un affichage Spotify facultatif.
 
-Your Claude plan usage (5-hour window and weekly limit) on a 96×16 Bluetooth LED matrix, driven by a Raspberry Pi, with a small web panel on your local network.
+[Français](#français) · [English](#english) · [Installation Windows](#windows) · [Installation Raspberry Pi](#raspberry-pi)
 
----
+![Les deux affichages LED avec les icônes originales Claude Desktop et Codex](docs/images/led-meter.png)
+
+*Rendus produits par le code du compteur, avec des valeurs illustratives. Les icônes originales sont centrées dans une colonne de 16 pixels à gauche.*
 
 ## Français
 
-### Développé grâce à pypixelcolor
+### Ce que vous voyez
 
-Ce projet utilise [pypixelcolor](https://github.com/lucagoc/pypixelcolor) pour communiquer en Bluetooth Low Energy avec la matrice LED iPixel, envoyer les images et régler l'écran. Merci à [lucagoc](https://github.com/lucagoc) et aux contributeurs de la bibliothèque pour leur travail.
+- Deux barres de consommation : fenêtre courte et semaine lorsque ces limites sont disponibles.
+- Le pourcentage **utilisé**, avec une couleur allant du vert au rouge.
+- L’icône **Claude Desktop** ou le **nuage bleu Codex**, pour identifier immédiatement le compte affiché.
+- Un panneau local avec les quotas des deux services, les réglages de l’écran et l’âge des derniers relevés.
+- Une reconnexion Bluetooth automatique, avec restauration de la luminosité, de l’orientation et de l’alimentation.
 
-### Ce que ça fait
+Le compteur fonctionne sur **Windows** ou sur un **Raspberry Pi équipé de Bluetooth**. La matrice prise en charge est une **iPixel 96 × 16 compatible avec pypixelcolor**. Le panneau peut être utilisé sans écran LED.
 
-L'écran affiche en permanence :
-- la barre du **5H**, avec son pourcentage, et toutes les 30 s l'heure de réinitialisation ;
-- la barre de la **semaine** (WEEK).
+### L’affichage suit la consommation
 
-Deux animations sont activables séparément : un flash quand la fenêtre de 5 heures repart à zéro, et la barre qui grimpe quand l'usage augmente. En cas de problème persistant, les dernières valeurs restent affichées et un code rouge (`AUTH`, `NET` ou `ERR`) remplace le pourcentage.
+Quand un pourcentage Claude ou Codex change au prochain relevé, l’écran passe au service concerné. Une remise à zéro compte aussi comme un changement.
 
-Le panneau web, accessible sur `http://claude-meter.local:8080` ou sur l'IP du Pi, permet de :
-- voir un aperçu de l'écran en direct ;
-- choisir la méthode de connexion au compte Claude ;
-- trouver l'écran en Bluetooth ;
-- régler la luminosité, l'orientation et l'alimentation ;
-- régler les intervalles et les animations.
+Si les deux changent, les mises à jour sont affichées successivement, pendant **au moins 8 secondes chacune**. Le dernier service reste ensuite visible jusqu’au prochain changement. Le premier relevé sert de référence : une récupération sans changement ne fait pas alterner l’écran.
 
-L'écran choisi et tous les réglages sont enregistrés dans `.env`, y compris l'alimentation. Le compteur se reconnecte au démarrage et après une coupure Bluetooth, puis réapplique luminosité, orientation et alimentation. Après un échec, les tentatives automatiques sont espacées de 10 secondes. Seules les orientations 0° et 180° sont proposées ; les anciennes valeurs 90°/270° reviennent à 0° au chargement.
+![Exemple de succession des affichages Claude et Codex](docs/images/switching.gif)
 
-Le panneau est organisé en trois onglets : **Compteur** (quotas et compte Claude), **Spotify** et **Paramètres** (écran, animations et visibilité de Spotify). L'aperçu LED reste visible dans les trois onglets. Les messages locaux, les pages d'envoi à distance et les relais externes ne sont pas inclus.
+*Illustration de deux mises à jour successives, 8 secondes par service. L’application ne boucle pas sans changement de consommation.*
 
-### ChatGPT et bascule automatique
+| Source | Fréquence de récupération | Connexion |
+| --- | --- | --- |
+| Claude OAuth | Réglage du panneau, minimum effectif de 60 s | Code d’autorisation, renouvellement automatique |
+| Session claude.ai | Réglage du panneau | Cookie de session à renouveler lorsqu’il expire |
+| ChatGPT / Codex | Toutes les 60 s | Connexion OpenAI par code d’appareil, renouvellement géré par Codex |
 
-Installe [Codex CLI](https://developers.openai.com/codex/cli) sur la machine qui exécute le compteur (`npm install -g @openai/codex`). Dans **Compteur**, clique sur **Connecter ChatGPT**, ouvre le lien OpenAI et saisis le code affiché. Si nécessaire, active la connexion par code d’appareil dans les paramètres de sécurité de ChatGPT.
+Une variation peut donc apparaître jusqu’au prochain relevé. Les erreurs réseau et limitations serveur peuvent allonger ce délai. Le panneau se rafraîchit toutes les 3 secondes ; cela ne déclenche pas de nouvelle requête aux fournisseurs.
 
-Le compteur utilise l’interface officielle `codex app-server` pour lire les quotas du compte, sans lancer de conversation ni consommer de crédits. Il affiche les fenêtres et limites fournies par OpenAI, avec le pourcentage **utilisé**. Une limite absente reste indisponible. Les identifiants sont isolés dans `.meter-codex/` (exclu de Git) et renouvelés par Codex ; la connexion de l’app Codex existante reste indépendante. Déconnecter ChatGPT dans le panneau déconnecte uniquement ce compteur.
+Pour OpenAI, le panneau conserve les différentes limites renvoyées par le service. La LED utilise la limite `codex` lorsqu’elle existe, sinon la première disponible. Une fenêtre absente est affichée comme indisponible, jamais comme un faux 0 %.
 
-Les quotas ChatGPT sont vérifiés chaque minute. Dès qu’un pourcentage Claude ou ChatGPT change, même lors d’une remise à zéro, l’écran passe au service concerné. Si les deux changent ensemble, chacun reste visible au moins 8 secondes ; ensuite, le dernier service reste affiché jusqu’au changement suivant. Le premier relevé sert de référence. Une colonne de 16 pixels à gauche affiche le logo Claude ou Codex, centré sur toute la hauteur ; les deux barres occupent la zone à droite. Spotify garde sa priorité temporaire, puis l’écran revient au compteur sélectionné. Le panneau conserve les deux relevés et leurs états. Pour plusieurs limites OpenAI, le panneau les affiche toutes ; la LED affiche la limite `codex` lorsqu’elle existe, sinon la première limite disponible.
+### Le panneau local
 
-### Spotify (facultatif)
+![Capture du panneau local avec Claude et ChatGPT connectés](docs/images/panel.png)
 
-Dans **Spotify**, connecte ton compte pour afficher la pochette, le titre et éventuellement l'artiste à chaque nouveau morceau. Après la durée choisie (10 secondes par défaut), l'écran revient aux quotas. La durée, la vitesse et l'affichage de l'artiste sont sauvegardés. Les couleurs unies des barres Claude restent inchangées.
+*Capture réelle du panneau. Les chiffres et heures reflètent uniquement l’instant de capture.*
 
-1. Crée ou ouvre ton application dans le [tableau de bord Spotify Developers](https://developer.spotify.com/dashboard).
-2. Enregistre l'adresse de retour affichée dans l'onglet, par défaut `http://127.0.0.1:8080/spotify/callback`.
-3. Renseigne son **Client ID**, clique sur **Connecter Spotify**, puis ouvre le lien proposé et autorise la connexion. Effectue cette étape depuis l'ordinateur qui exécute LED Meter. Pour un Pi sans navigateur, utilise un tunnel SSH vers son port web depuis ton ordinateur.
+Ouvrez **http://localhost:8080** sur le PC hôte. Sur le réseau local, utilisez l’adresse IP de la machine et le port `8080`. L’installation Raspberry Pi propose aussi **http://claude-meter.local:8080**.
 
-Le parcours [OAuth PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) n'exige aucun Client Secret. Les identifiants renouvelables restent dans `.spotify-oauth.json`, exclu de Git. Spotify impose une [adresse de retour loopback explicite](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri), pas `localhost`. L'accès dépend aussi des restrictions du compte et de l'application Spotify ; le panneau indique les refus et respecte les délais HTTP 429.
+- **Compteur** : aperçu de l’écran, quotas et connexions Claude/ChatGPT.
+- **Spotify** : compte, durée d’affichage, défilement et artiste.
+- **Paramètres** : recherche Bluetooth, luminosité, orientation, alimentation, intervalles et animations.
 
-Dans **Paramètres**, décoche **Afficher l'onglet Spotify** pour le masquer et arrêter son suivi et son affichage LED, sans effacer la connexion. Pour laisser l'onglet visible mais suspendre l'affichage musical, décoche **Afficher les nouveaux morceaux sur l'écran** dans Spotify. Le bouton **Déconnecter** efface uniquement les identifiants Spotify du compteur.
+L’indicateur supérieur correspond aux relevés **Claude** ; ChatGPT possède son propre état dans sa section. « Relevé il y a… » indique la dernière récupération réussie, même si les pourcentages n’ont pas changé. Les erreurs sont signalées dès la première tentative échouée. Au survol de l’indicateur Claude, retrouvez l’heure du relevé et l’intervalle effectif.
 
-### Matériel
+### Windows
 
-- Un Raspberry Pi avec Bluetooth (testé sur Raspberry Pi OS, base Debian).
-- Une matrice LED iPixel 96×16 pilotée en BLE via [pypixelcolor](https://pypi.org/project/pypixelcolor/).
+Prérequis : **Python 3** et Bluetooth pour piloter un écran. Pour ChatGPT/Codex, ajoutez **Node.js/npm** et **Codex CLI**.
 
-### Installation
+1. Téléchargez ou clonez ce dépôt.
+2. Double-cliquez sur **Installer-Windows.bat**.
+3. Choisissez si le compteur doit démarrer à l’ouverture de session Windows.
+4. Ouvrez le raccourci **LED Meter** sur le Bureau, puis choisissez votre écran avec **Find displays**.
+
+L’installation se trouve dans `Documents/LED Meter`, sans droits administrateur. Une réinstallation conserve les réglages et les connexions. Le raccourci ouvre le panneau sans lancer une seconde instance.
+
+Pour un lancement depuis le dossier du dépôt, utilisez **Lancer.bat** et gardez sa fenêtre ouverte. Ce lancement utilise les réglages de ce dossier, séparément de l’installation permanente.
+
+Pour le compte ChatGPT :
+
+```powershell
+npm install -g @openai/codex
+```
+
+Pour modifier le démarrage automatique, relancez l’installateur ou utilisez :
+
+```powershell
+.\install_windows.ps1 -AutoStart Yes
+# Ou : -AutoStart No
+```
+
+### Raspberry Pi
+
+Sur Raspberry Pi OS avec Bluetooth :
 
 ```bash
 git clone https://github.com/Ruben746/claude-led-screen-meter.git
@@ -64,196 +90,125 @@ cd claude-led-screen-meter
 ./install.sh
 ```
 
-L'installeur :
-- installe Bluetooth et avahi ;
-- crée l'environnement Python ;
-- copie `.env.example` en `.env` ;
-- crée deux services : `claude-meter` pour l'application, `claude-meter-mdns` pour l'adresse `claude-meter.local`.
-
-Le Pi garde son propre nom d'hôte. Pour un autre nom : `LED_MDNS_NAME=bureau-meter ./install.sh`.
-
-Ouvre ensuite le panneau, clique sur **Find displays**, choisis ton écran, puis connecte le compte Claude.
-
-### Lancement rapide sous Windows
-
-Pour une installation durable, double-clique sur **Installer-Windows.bat**. L'installateur demande si LED Meter doit démarrer automatiquement à l'ouverture de ta session Windows (**O/N**). Entrée conserve le choix existant ; lors d'une première installation, le choix par défaut est **non**. L'application est installée dans `Documents/LED Meter`, avec un raccourci sur le Bureau dans les deux cas. Aucun droit administrateur n'est nécessaire. Connecte ton compte depuis cette installation une première fois ; ses identifiants restent séparés de ceux d'autres copies.
-
-Le raccourci du Bureau ouvre le panneau sans lancer une seconde instance. Les erreurs sont enregistrées dans `meter.log` dans le dossier d'installation. Pour modifier le démarrage automatique, relance l'installateur et choisis **O** ou **N** ; le choix non retire le raccourci de démarrage existant. Tu peux aussi le retirer depuis `shell:startup` (**Win+R**). Une réinstallation conserve les réglages et les connexions Claude et Spotify. En ligne de commande, `install_windows.ps1 -AutoStart Yes` ou `-AutoStart No` permet de fournir le choix explicitement.
-
-Double-clique sur **Lancer.bat**. Python 3 doit être installé. Au premier lancement, le script prépare l'environnement et installe les dépendances ; les lancements suivants les réutilisent. Il conserve le fichier `.env` existant et ouvre le panneau dans le navigateur quand le serveur est prêt.
-
-Garde la fenêtre ouverte pendant l'utilisation. Ferme-la ou utilise **Ctrl+C** pour arrêter le compteur. Aucun écran LED n'est nécessaire pour tester le panneau.
-
-### Connexion au compte Claude
-
-Deux méthodes, à choisir dans le panneau.
-
-**Claude OAuth** (connexion par code).
-
-L’échange et le renouvellement des jetons identifient désormais le compteur avec son propre User-Agent, au lieu de celui d’une ancienne version de Claude Code qui provoquait des réponses 429 avant validation. Les véritables limites de débit restent respectées.
-
-1. Dans le panneau, choisis **Claude OAuth**, puis **Connect with Claude**.
-2. Clique sur **Open Claude sign-in**, connecte-toi sur Claude et autorise la connexion.
-3. Copie le code affiché par Claude, reviens dans le panneau et colle-le dans **Authorization code**.
-4. Clique sur **Complete connection**.
-
-Garde le panneau ouvert pendant la connexion. Le lien expire après 10 minutes ; après une erreur ou un redémarrage, recommence avec **Connect with Claude**. En cas de HTTP 429, respecte le délai affiché avant de demander un nouveau code. Le compteur utilise `Retry-After` (secondes ou date HTTP), ou une pause locale de 120 secondes si le serveur ne donne aucun délai exploitable. Cette pause ne garantit pas la réussite suivante et n'est pas conservée après un redémarrage. Un échec conserve la méthode de connexion existante ; garde le mode session s'il fonctionne.
-
-Le compteur enregistre ses propres identifiants dans `.meter-oauth.json` (exclu de Git, permissions privées) et renouvelle automatiquement le jeton. Il conserve aussi le nouveau jeton de renouvellement quand Claude le remplace. Aucune installation de Claude Code ni copie de cookie n'est nécessaire. Les permissions demandées sont `org:create_api_key user:profile`, sans `user:inference`.
-
-Pour une installation existante, fais `git pull`, puis `sudo systemctl restart claude-meter`, et connecte-toi une fois avec le nouveau bouton. Les anciens identifiants Claude Code ne sont pas écrasés. Une révocation côté Claude peut toujours nécessiter une nouvelle connexion.
-
-**Claude Code (ancien parcours, avancé)**. Tu peux conserver une connexion sur le Pi lui-même :
+L’installateur prépare Python, Bluetooth et avahi, puis crée les services `claude-meter` et `claude-meter-mdns`. Le Pi conserve son nom d’hôte. Pour personnaliser l’alias du compteur :
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash
-claude        # se connecter avec le compte Claude, puis /exit
+LED_MDNS_NAME=bureau-meter ./install.sh
 ```
 
-Ce parcours exige de définir explicitement `LED_OAUTH_FILE=~/.claude/.credentials.json` dans `.env`, puis de redémarrer le compteur. Par défaut, seul `.meter-oauth.json` est utilisé : aucun ancien identifiant n'est lu ni renouvelé automatiquement. Deux précautions :
-- Ne copie pas ce fichier depuis un ordinateur qui utilise aussi Claude Code : les deux se disputeraient le même jeton.
-- Ne fais pas `claude logout` sur le Pi.
+ChatGPT nécessite également une installation de **Codex CLI compatible avec l’architecture du Pi**, accessible dans le `PATH` du service. La connexion par code d’appareil peut être terminée sur un autre ordinateur. Sans Codex CLI, la partie Claude reste utilisable.
 
-Dans ce mode, l'usage est lu au plus une fois par minute.
+### Connecter Claude
 
-**Session claude.ai**. Colle la valeur du cookie `sessionKey` de claude.ai dans le panneau. Si Cloudflare bloque, ajoute aussi `cf_clearance` et le User-Agent exact du navigateur d'où vient ce cookie. L'organisation est détectée automatiquement. Une session expire : il faudra la recoller de temps en temps.
+1. Sélectionnez **Claude OAuth**, puis **Connect with Claude**.
+2. Ouvrez **Open Claude sign-in** avec le bon compte Claude.
+3. Autorisez la connexion et copiez le code retourné.
+4. Collez-le dans **Authorization code**, puis cliquez sur **Complete connection**.
 
-### Avertissement
+Le lien expire après 10 minutes. Gardez le panneau ouvert jusqu’à la fin. Le compteur conserve ses propres identifiants et renouvelle le token automatiquement ; l’heure d’expiration affichée concerne le token courant. L’échange et le renouvellement utilisent le User-Agent du compteur. Les réponses HTTP 429 restent respectées, avec le délai `Retry-After` ou une pause locale de 120 secondes si aucun délai exploitable n’est fourni.
 
-Projet personnel, **non affilié à Anthropic et non approuvé par Anthropic**. Il repose sur des endpoints non documentés, qui peuvent changer ou disparaître à tout moment. Les conditions d'Anthropic réservent les jetons OAuth des abonnements Claude à Claude Code et Claude.ai, et encadrent l'accès automatisé à leurs services. Les deux méthodes de connexion sortent donc de ce cadre. Tu les utilises sous ta propre responsabilité, avec ton propre compte.
+**Alternative : session claude.ai.** Collez le cookie `sessionKey` dans la section correspondante. Si nécessaire, renseignez `cf_clearance` et le User-Agent du navigateur ayant fourni le cookie. Une session expirée doit être remplacée.
 
-Le panneau n'a pas d'authentification par défaut : garde-le sur ton réseau local. `LED_ADMIN_TOKEN` exige un code pour modifier le compte ou l'écran.
+<details>
+<summary>Ancienne connexion Claude Code — usage avancé</summary>
 
-### Dépannage
+Une connexion Claude Code locale peut être utilisée en définissant explicitement `LED_OAUTH_FILE=~/.claude/.credentials.json` dans `.env`, puis en redémarrant le compteur. Aucun fichier Claude Code n’est lu par défaut. Évitez de partager un même refresh token entre plusieurs installations : elles peuvent se disputer son renouvellement.
+
+</details>
+
+### Connecter ChatGPT / Codex
+
+1. Installez Codex CLI sur la machine qui exécute le compteur.
+2. Cliquez sur **Connecter ChatGPT** dans le panneau.
+3. Ouvrez **Ouvrir la connexion OpenAI**, puis saisissez le code affiché.
+4. Connectez le compte utilisé dans l’app. Le compteur détecte la connexion automatiquement.
+
+Si OpenAI le demande, activez la connexion par code d’appareil dans les paramètres de sécurité de votre compte.
+
+Le compteur lit les limites via l’interface officielle **`codex app-server`**, sans lancer de conversation avec un modèle. Il affiche les quotas fournis pour le compte, pas un compteur universel des messages de chatgpt.com. Le renouvellement des identifiants est géré par Codex. La connexion du compteur est isolée de celle de votre application Codex existante ; **Déconnecter ChatGPT** ne déconnecte que le compteur.
+
+### Spotify, en option
+
+À chaque nouveau morceau, l’écran peut afficher la pochette et faire défiler le titre, avec ou sans artiste. Après la durée choisie — 10 secondes par défaut — il revient au service sélectionné. Les changements de consommation en attente sont conservés pendant l’affichage musical.
+
+1. Créez une application dans [Spotify Developers](https://developer.spotify.com/dashboard).
+2. Ajoutez l’adresse de retour affichée dans le panneau : par défaut `http://127.0.0.1:8080/spotify/callback`.
+3. Renseignez le **Client ID**, puis cliquez sur **Connecter Spotify**.
+
+Aucun Client Secret n’est nécessaire. Terminez la connexion depuis la machine hôte ; pour un Pi sans navigateur, utilisez un tunnel SSH vers le port du panneau. L’accès dépend des restrictions de l’application et du compte Spotify.
+
+Dans Paramètres, masquer l’onglet Spotify suspend son suivi et son affichage sans effacer la connexion. Désactiver seulement l’affichage des nouveaux morceaux laisse l’onglet disponible.
+
+### Réglages et données locales
+
+| Fichier | Contenu |
+| --- | --- |
+| `.env` | Réglages du compteur, écran choisi, éventuelle session Claude |
+| `.meter-oauth.json` | Connexion OAuth Claude du compteur |
+| `.meter-codex/` | Connexion ChatGPT isolée, gérée par Codex |
+| `.spotify-oauth.json` | Connexion Spotify |
+| `meter.log` | Journal du lancement Windows en arrière-plan |
+
+Ces données privées sont exclues de Git. Le panneau n’a pas d’authentification complète : conservez-le sur un réseau de confiance. `LED_ADMIN_TOKEN` permet d’exiger un code pour les modifications ; il ne protège pas la consultation des quotas.
+
+Les réglages comprennent les animations Claude, la luminosité, l’alimentation et les orientations **0°/180°**. Ils sont conservés après redémarrage. Les anciennes orientations 90°/270° sont ramenées à 0°.
+
+### Mise à jour et dépannage
+
+Sur Windows : récupérez la nouvelle version, arrêtez l’instance du compteur, puis relancez **Installer-Windows.bat**. Ne supprimez pas les fichiers de connexion. Sur Pi :
 
 ```bash
-journalctl -u claude-meter -f              # logs en direct
+git pull
 sudo systemctl restart claude-meter
+journalctl -u claude-meter -f
 ```
 
-- **Find displays ne trouve rien** : l'écran est peut-être encore connecté à l'app du téléphone. Ferme-la, puis relance la recherche.
-- **`claude-meter.local` ne répond pas** : utilise l'IP du Pi. Certains réseaux ou appareils Android anciens ne résolvent pas le mDNS.
+| Symptôme | À vérifier |
+| --- | --- |
+| Aucun écran trouvé | Fermez l’application du téléphone qui peut garder la connexion Bluetooth. |
+| `claude-meter.local` inaccessible | Essayez l’adresse IP de la machine ; le mDNS dépend du réseau. |
+| Refus OAuth Claude | Vérifiez le compte dans le navigateur, puis recommencez avec un nouveau lien. Respectez tout délai 429. |
+| ChatGPT ne se connecte pas | Vérifiez `codex --version` sur la machine hôte et l’autorisation de connexion par code d’appareil. |
+| Les pourcentages restent identiques | Un relevé réussi ne signifie pas que le fournisseur a modifié ses chiffres. Vérifiez l’âge et les erreurs du relevé. |
+| L’écran ne bascule pas | Le premier relevé établit la référence ; il faut ensuite un changement de consommation. |
 
----
+### Développement
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m unittest discover -v
+node test_panel.cjs
+.\test_installer.ps1
+```
+
+Les tests couvrent notamment OAuth, les limites OpenAI, les changements de service, Spotify et les réglages. Les tests automatisés ne remplacent pas la vérification de la connexion réelle et de l’écran physique.
 
 ## English
 
-### Built with pypixelcolor
+**LED Meter** displays Claude and ChatGPT/Codex account usage on a **96 × 16 iPixel BLE matrix**, with a local web panel and optional Spotify playback display. Original Claude Desktop and blue Codex cloud icons identify each provider in a dedicated left-hand column.
 
-This project uses [pypixelcolor](https://github.com/lucagoc/pypixelcolor) to communicate with the iPixel LED matrix over Bluetooth Low Energy, send images and control display settings. Thanks to [lucagoc](https://github.com/lucagoc) and the library's contributors for their work.
+### How switching works
 
-### What it does
+A change in either usage window selects that provider at the next poll, including quota resets. Simultaneous changes are queued for **at least eight seconds each**. The last selected provider stays visible until another change. Initial readings establish a baseline; unchanged polls do not switch the display. Spotify temporarily takes priority without discarding pending provider changes.
 
-The display shows at all times:
-- the **5H** bar with its percentage, plus the reset time every 30 s;
-- the **weekly** bar (WEEK).
+Claude OAuth polls no faster than once a minute; ChatGPT polls every 60 seconds. The web panel refreshes every three seconds without fetching provider quotas again. Values are **used percentages**. Missing OpenAI windows remain unavailable rather than becoming zero. All returned buckets appear in the panel; the LED uses `codex`, or the first available bucket.
 
-Two animations can be switched on separately: a flash when the 5-hour window resets, and the bar climbing when usage goes up. If a problem persists, the last values stay on screen and a red code (`AUTH`, `NET` or `ERR`) replaces the percentage.
+### Install and connect
 
-The web panel, at `http://claude-meter.local:8080` or the Pi's IP, lets you:
-- see a live preview of the display;
-- choose how to sign in to Claude;
-- find the display over Bluetooth;
-- set brightness, orientation and power;
-- set the intervals and animations.
+- **Windows:** install Python 3, run `Installer-Windows.bat`, choose optional startup at sign-in, then open the desktop shortcut. Files live in `Documents/LED Meter`. `Lancer.bat` runs directly from the repository in a visible terminal. Reinstalling preserves local settings and credentials.
+- **Raspberry Pi:** clone the repository and run `./install.sh`. Open `http://claude-meter.local:8080` or the host IP on port 8080. Use **Find displays** to select the BLE matrix.
+- **Claude:** choose **Claude OAuth**, open the sign-in link, authorize, paste the returned code and complete the connection. Tokens refresh automatically. A claude.ai session cookie is also supported. Respect server retry delays.
+- **ChatGPT/Codex:** install Codex CLI (`npm install -g @openai/codex`) on the host, click **Connecter ChatGPT**, and complete the OpenAI device-code flow. The official app-server reads account limits without starting model conversations. Its `.meter-codex/` credentials are isolated from your existing Codex app. This does not represent every message limit on chatgpt.com.
+- **Spotify:** register the displayed loopback callback in your Spotify developer application, enter its Client ID and complete the PKCE login. No client secret is required. A headless Pi needs an SSH tunnel for the Spotify callback.
 
-The selected display and every setting are saved to `.env`, including power. The meter reconnects at startup and after Bluetooth disconnections, then restores brightness, orientation and power. Failed automatic attempts are spaced 10 seconds apart. Only 0° and 180° orientations are supported; legacy 90°/270° values load as 0°.
+The top-right freshness indicator refers to Claude. ChatGPT has a separate status. Credentials and settings are Git-ignored; keep the web panel on a trusted local network. `LED_ADMIN_TOKEN` protects changes, not quota viewing. Windows background logs are in `meter.log`; Pi logs are available through `journalctl -u claude-meter -f`.
 
-Bluetooth connection detection uses the private `AsyncClient._session.is_connected` property because pypixelcolor 0.5.0 can retain a stale client connection flag after a remote disconnect. Recheck this integration when upgrading the dependency.
+## Sources et remerciements / Credits
 
-The panel has three tabs: **Compteur** (meter and Claude account), **Spotify**, and **Paramètres** (settings, display and Spotify visibility). The LED preview remains visible in all tabs. Local messages, remote message pages and relay polling are not included.
+- [pypixelcolor](https://github.com/lucagoc/pypixelcolor), par lucagoc et ses contributeurs : communication Bluetooth et pilotage de la matrice.
+- [Codex app-server](https://developers.openai.com/codex/app-server) : connexion ChatGPT et lecture des quotas OpenAI.
+- [Spotify OAuth PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow).
+- [Provenance des icônes originales](assets/SOURCES.md) : Claude Desktop et Codex.
 
-### ChatGPT and automatic display switching
-
-Install [Codex CLI](https://developers.openai.com/codex/cli) on the meter host (`npm install -g @openai/codex`). In Compteur, click **Connecter ChatGPT**, open the OpenAI link and enter the device code. Enable device-code login in ChatGPT security settings if required. The official app-server reads account limits without starting model conversations. Credentials live separately in the Git-ignored `.meter-codex/` and are refreshed by Codex. Disconnecting the meter does not log out other Codex installations.
-
-Polling runs every minute. A usage change (including resets) selects the corresponding provider on the LED. Simultaneous changes are queued, with at least eight seconds per provider. Initial readings establish the baseline; unchanged polls do not switch the display. A dedicated 16-pixel column on the left shows the Claude or Codex logo, vertically centred, with both usage bars to its right. Spotify temporarily takes priority. The panel shows all returned buckets; the LED uses `codex`, or the first available bucket. Missing windows are displayed as unavailable, never zero.
-
-### Optional Spotify display
-
-The Spotify tab displays cover art, track title and optionally the artist when a new song starts. It returns to the Claude meter after the selected duration (10 seconds by default). Duration, scrolling speed and artist visibility are saved. Claude's solid bar colors are unchanged.
-
-Create or open an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard), register the redirect URI shown in the tab (default `http://127.0.0.1:8080/spotify/callback`), then enter the Client ID and follow **Connecter Spotify**. Sign in using a browser on the computer running LED Meter; a headless Pi requires an SSH tunnel to its web port. [PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) requires no client secret. Spotify credentials are stored separately in the Git-ignored `.spotify-oauth.json`. Spotify account and app access restrictions still apply; failures and rate limits are shown in the panel.
-
-Uncheck **Afficher l'onglet Spotify** in Paramètres to hide the tab and stop both Spotify polling and LED playback, preserving credentials. Uncheck **Afficher les nouveaux morceaux sur l'écran** to pause the feature while keeping its tab visible. **Déconnecter** removes only this meter's Spotify credentials.
-
-### Hardware
-
-- A Raspberry Pi with Bluetooth (tested on Raspberry Pi OS, Debian based).
-- A 96×16 iPixel LED matrix, driven over BLE through [pypixelcolor](https://pypi.org/project/pypixelcolor/).
-
-### Install
-
-```bash
-git clone https://github.com/Ruben746/claude-led-screen-meter.git
-cd claude-led-screen-meter
-./install.sh
-```
-
-The installer:
-- installs Bluetooth and avahi;
-- creates the Python environment;
-- copies `.env.example` to `.env`;
-- creates two services: `claude-meter` for the app, `claude-meter-mdns` for the `claude-meter.local` address.
-
-The Pi keeps its own hostname. For another name: `LED_MDNS_NAME=desk-meter ./install.sh`.
-
-Then open the panel, click **Find displays**, pick your display and connect your Claude account.
-
-### Quick start on Windows
-
-For a permanent installation, double-click **Installer-Windows.bat**. The installer asks whether to start automatically at Windows sign-in (**O** for yes, **N** for no). Pressing Enter preserves the existing choice; a new installation defaults to no. It installs into `Documents/LED Meter` and creates a desktop shortcut in either case, without administrator rights. Connect your account once in this installation. Reinstalling preserves its settings and Claude/Spotify credentials.
-
-The desktop shortcut opens the panel without a second instance. Background errors go to `meter.log` in the installation folder. Rerun the installer to change the startup choice; no removes an existing startup shortcut. You can also remove **LED Meter** from `shell:startup` (**Win+R**). For command-line installation use `install_windows.ps1 -AutoStart Yes` or `-AutoStart No`.
-
-Double-click **Lancer.bat** with Python 3 installed. The launcher prepares the environment and installs dependencies when needed, preserves an existing `.env`, and opens the panel once the server is ready. Keep its window open; close it or press **Ctrl+C** to stop. You can test the panel without an LED display.
-
-### Signing in to Claude
-
-Two methods, chosen in the panel.
-
-**Claude OAuth** (copy-and-paste code flow).
-
-Token exchange and refresh now identify the meter with its own User-Agent instead of an old Claude Code identity that triggered HTTP 429 before validation. Genuine rate limits are still respected.
-
-1. Select **Claude OAuth**, then **Connect with Claude** in the panel.
-2. Follow **Open Claude sign-in**, sign in to Claude and authorize the connection.
-3. Copy the code Claude displays and paste it into **Authorization code** in the panel.
-4. Click **Complete connection**.
-
-Keep the panel open. The link expires after 10 minutes; after an error or restart, use **Connect with Claude** again. For HTTP 429, wait for the displayed delay before requesting a fresh code. The meter respects `Retry-After` (seconds or HTTP date), falling back to a local 120-second pause if the server supplies no usable delay. This does not guarantee success and is not retained across restarts. A failed login preserves the existing sign-in method; keep session mode if it works.
-
-The meter stores its own credentials in `.meter-oauth.json` (Git-ignored, private permissions), automatically refreshes the access token and saves rotated refresh tokens. No Claude Code installation or cookie copying is needed. Requested scopes are `org:create_api_key user:profile`, without `user:inference`.
-
-For an existing installation, run `git pull` and `sudo systemctl restart claude-meter`, then connect once using the new button. Existing Claude Code credentials are not overwritten. Revocation by Claude can still require signing in again.
-
-**Claude Code (legacy, advanced)**. You can keep using a login on the Pi itself:
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-claude        # sign in with your Claude account, then /exit
-```
-
-This legacy method requires explicitly setting `LED_OAUTH_FILE=~/.claude/.credentials.json` in `.env` and restarting the meter. By default, only `.meter-oauth.json` is used: other applications' credentials are never automatically read or refreshed. Two precautions:
-- Don't copy that file from a computer that also runs Claude Code: both would fight over the same token.
-- Don't run `claude logout` on the Pi.
-
-In this mode usage is read at most once a minute.
-
-**claude.ai session**. Paste the value of the claude.ai `sessionKey` cookie into the panel. If Cloudflare blocks the requests, also add `cf_clearance` and the exact User-Agent of the browser that cookie comes from. The organization is detected automatically. Sessions expire, so you will need to paste a fresh one now and then.
-
-### Disclaimer
-
-Personal project, **not affiliated with or endorsed by Anthropic**. It relies on undocumented endpoints that can change or disappear at any time. Anthropic's terms restrict OAuth tokens from Claude subscriptions to Claude Code and Claude.ai, and limit automated access to their services, so both sign-in methods fall outside what Anthropic permits. Use them at your own risk, with your own account.
-
-The panel has no authentication by default: keep it on your local network. `LED_ADMIN_TOKEN` requires a code to change the account or the display.
-
-### Troubleshooting
-
-```bash
-journalctl -u claude-meter -f              # live logs
-sudo systemctl restart claude-meter
-```
-
-- **Find displays finds nothing**: the display may still be connected to the phone app. Close the app and search again.
-- **`claude-meter.local` does not respond**: use the Pi's IP. Some networks and older Android devices don't resolve mDNS.
+Projet personnel, non affilié à Anthropic, OpenAI ou Spotify. Les marques appartiennent à leurs propriétaires. L’intégration Claude utilise des endpoints non documentés, dont l’accès et le comportement peuvent changer. La disponibilité des données dépend des services et des comptes connectés.

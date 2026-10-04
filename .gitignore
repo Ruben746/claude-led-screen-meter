@@ -12,3 +12,5 @@ meter.log.old
 .meter-codex/
 
 !assets/*.png
+
+!docs/images/*.png
