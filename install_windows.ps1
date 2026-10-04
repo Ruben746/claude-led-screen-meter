@@ -23,11 +23,20 @@ $sourceDir = $PSScriptRoot
 $installDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'LED Meter'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
-foreach ($name in @('claude_meter.py', 'spotify_meter.py', 'windows_runner.py', 'requirements.txt', '.env.example', 'Lancer.bat', 'Installer-Windows.bat', 'install_windows.ps1')) {
+foreach ($name in @('claude_meter.py', 'codex_meter.py', 'spotify_meter.py', 'windows_runner.py', 'requirements.txt', '.env.example', 'Lancer.bat', 'Installer-Windows.bat', 'install_windows.ps1')) {
     $sourceFile = Join-Path $sourceDir $name
     $targetFile = Join-Path $installDir $name
     if ([IO.Path]::GetFullPath($sourceFile) -ne [IO.Path]::GetFullPath($targetFile)) {
         Copy-Item -LiteralPath $sourceFile -Destination $targetFile -Force
+    }
+}
+$assetsDir = Join-Path $installDir 'assets'
+New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
+foreach ($name in @('claude-desktop.png', 'codex-desktop.png', 'SOURCES.md')) {
+    $sourceAsset = Join-Path (Join-Path $sourceDir 'assets') $name
+    $targetAsset = Join-Path $assetsDir $name
+    if ([IO.Path]::GetFullPath($sourceAsset) -ne [IO.Path]::GetFullPath($targetAsset)) {
+        Copy-Item -LiteralPath $sourceAsset -Destination $targetAsset -Force
     }
 }
 $config = Join-Path $installDir '.env'

@@ -12,7 +12,7 @@ import secrets
 import threading
 import math
 from email.utils import parsedate_to_datetime
-from functools import wraps
+from functools import wraps, lru_cache
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -21,6 +21,7 @@ import requests
 from PIL import Image, ImageDraw
 from aiohttp import web
 from pypixelcolor import AsyncClient
+from codex_meter import CodexMeter, CodexError, UsageSwitch
 from spotify_meter import SpotifyClient, SpotifyError, SpotifyView, poll_spotify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +67,9 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_UA = os.getenv("LED_OAUTH_UA", "claude-code/2.1.0")
+# Identify the meter honestly at the token endpoint; the legacy Claude Code UA
+# gets HTTP 429 before request validation, including for invalid test codes.
+OAUTH_TOKEN_UA = "claude-led-screen-meter/1.0"
 OAUTH_MIN_REFRESH = 60        # this endpoint rate-limits hard: never poll faster
 OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 OAUTH_LOCK = threading.RLock()
@@ -245,7 +249,7 @@ def finish_oauth_login(flow, pasted_code):
         "grant_type": "authorization_code", "code": code, "state": flow["state"],
         "client_id": OAUTH_CLIENT_ID, "redirect_uri": OAUTH_REDIRECT_URI,
         "code_verifier": flow["verifier"],
-    }, headers={"Content-Type": "application/json", "User-Agent": OAUTH_UA}, timeout=15)
+    }, headers={"Content-Type": "application/json", "User-Agent": OAUTH_TOKEN_UA}, timeout=15)
     if r.status_code == 429:
         delay = _retry_after(r, default=None)
         raise RateLimited(delay if delay is not None else 120, server_delay=delay is not None)
@@ -295,7 +299,7 @@ def _refresh_oauth(data, oauth):
     r = requests.post(
         OAUTH_TOKEN_URL,
         json={"grant_type": "refresh_token", "refresh_token": rt, "client_id": OAUTH_CLIENT_ID},
-        headers={"Content-Type": "application/json", "User-Agent": OAUTH_UA,
+        headers={"Content-Type": "application/json", "User-Agent": OAUTH_TOKEN_UA,
                  "anthropic-beta": "oauth-2025-04-20"},
         timeout=15,
     )
@@ -433,25 +437,47 @@ def percentage_color(value):
     return GRADIENT[-1][1]
 
 
-def draw_bar(draw, y, value, height=3):
+def draw_bar(draw, y, value, height=3, x_start=0, width=96):
     """Use one usage-dependent colour across the bar; dim the unfilled part."""
-    filled = round(96 * max(0, min(100, value)) / 100)
+    filled = round(width * max(0, min(100, value)) / 100)
     base = percentage_color(value)
-    for x in range(96):
-        col = base if x < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
+    for x in range(x_start, x_start + width):
+        col = base if x - x_start < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
         for yy in range(height):
             draw.point((x, y + yy), fill=col)
 
 
-def render(session, weekly, top_right, top_color=WHITE):
+@lru_cache(maxsize=2)
+def provider_logo(provider):
+    """Rasterize the original brand asset; never reconstruct its geometry."""
+    name = 'codex-desktop.png' if provider == 'chatgpt' else 'claude-desktop.png'
+    with Image.open(os.path.join(BASE_DIR, 'assets', name)) as source:
+        logo = source.convert('RGBA')
+    # Remove transparent export padding only, preserving the complete mark.
+    bounds = logo.getchannel('A').getbbox()
+    if bounds:
+        logo = logo.crop(bounds)
+    logo.thumbnail((16, 16), Image.Resampling.LANCZOS)
+    return logo
+
+
+def render(session, weekly, top_right, top_color=WHITE, labels=("5H", "WEEK"), provider='claude'):
     img = Image.new("RGB", (96, 16), BLACK)
     d = ImageDraw.Draw(img)
-    draw_text(d, "5H", 1, 0, WHITE)
+    logo = provider_logo(provider)
+    img.paste(logo, ((16-logo.width)//2, (16-logo.height)//2), logo)
+    if labels[0] == "5H":
+        draw_text(d, "5", 19, 0, WHITE)
+        draw_text(d, "H", 24, 0, WHITE)
+    else:
+        draw_text(d, labels[0], 19, 0, WHITE)
     draw_text_right(d, top_right, 95, 0, top_color)
-    draw_bar(d, 5, session)
-    draw_text(d, "WEEK", 1, 8, WHITE)
-    draw_text_right(d, f"{int(round(weekly))}%", 95, 8, WHITE)
-    draw_bar(d, 13, weekly)
+    if session is not None:
+        draw_bar(d, 5, session, x_start=18, width=78)
+    draw_text(d, labels[1], 19, 8, WHITE)
+    draw_text_right(d, f"{int(round(weekly))}%" if weekly is not None else "--", 95, 8, WHITE)
+    if weekly is not None:
+        draw_bar(d, 13, weekly, x_start=18, width=78)
     return img
 
 
@@ -563,6 +589,9 @@ class State:
         self.status = None          # AUTH / NET / ERR once failures persist
         self.last_ok = None         # epoch of last successful fetch
         self.last_error = ""
+        self.fetching = False
+        self.codex = None
+        self.active_provider = "claude"
         self.force_refetch = False
         self.redraw = False
         self.preview = b""
@@ -693,7 +722,7 @@ HTML_PAGE = r"""<!doctype html>
 <main>
   <header>
     <h1>Claude meter</h1>
-    <span id="conn">Loading…</span>
+    <span id="conn" role="status" aria-live="polite">Chargement…</span>
   </header>
 
     <div class="field" id="adminField" hidden>
@@ -714,6 +743,19 @@ HTML_PAGE = r"""<!doctype html>
     <div><dt>Weekly</dt><dd id="rwk">–</dd></div>
     <div><dt>5-hour resets at</dt><dd id="rrst">–</dd></div>
   </dl>
+
+  <section aria-labelledby="h-chatgpt">
+    <h2 id="h-chatgpt">ChatGPT · quota de l’app</h2>
+    <p class="note">Connexion au compte ChatGPT via Codex. Les fenêtres et pourcentages sont ceux renvoyés par OpenAI.</p>
+    <p id="chatgptStatus" role="status">Non connecté.</p>
+    <div id="chatgptLimits"></div>
+    <p class="row"><button id="connectChatgpt" class="primary">Connecter ChatGPT</button>
+      <button id="disconnectChatgpt" hidden>Déconnecter ChatGPT</button></p>
+    <p id="chatgptLogin" hidden><a id="chatgptLink" target="_blank" rel="noopener noreferrer">Ouvrir la connexion OpenAI</a> · Code : <strong id="chatgptCode"></strong></p>
+    <p id="chatgptResult" class="note" role="status"></p>
+    <p class="note">L’écran bascule vers le service dont la consommation change, au prochain relevé. Si les deux changent, chacun reste visible au moins 8 secondes. Le logo à gauche identifie Claude ou Codex.</p>
+    <p class="note" id="activeProvider"></p>
+  </section>
 
   <section aria-labelledby="h-account">
     <h2 id="h-account">Claude account</h2>
@@ -916,6 +958,37 @@ const set = (name, value) => api('/api/set', {name, value}).then(load);
 const ago = t => { const s = Math.round(Date.now()/1000 - t); return s < 60 ? 'just now' : s < 3600 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago'; };
 const clock = ms => new Date(ms).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
 
+function renderUsageStatus(s) {
+  const a = s.auth;
+  const conn = $('#conn');
+  const age = a.last_ok == null ? null : Math.max(0, Math.floor((s.server_time ?? Date.now()/1000) - a.last_ok));
+  const duration = age === null ? '' : age < 60 ? age + ' s' : age < 3600 ? Math.floor(age/60) + ' min ' + age%60 + ' s' : Math.floor(age/3600) + ' h ' + Math.floor(age%3600/60) + ' min';
+  const detail = age === null ? 'Aucune donnée reçue' : 'Relevé il y a ' + duration;
+  const interval = s.effective_refresh ?? (a.mode === 'oauth' ? Math.max(60, s.refresh) : s.refresh);
+  const stale = age !== null && age > interval + 30;
+  conn.className = a.last_error || stale ? 'bad' : a.fetching || age === null ? '' : 'ok';
+  conn.textContent = (a.last_error ? 'Actualisation en échec · ' : a.fetching ? 'Vérification… · ' : stale ? 'Données anciennes · ' : '') + detail;
+  conn.title = (age === null ? '' : 'Dernière récupération réussie : ' + new Date(a.last_ok * 1000).toLocaleTimeString() + '. ') +
+    'Intervalle effectif : ' + interval + ' s. ' + (a.last_error || 'Une récupération réussie ne signifie pas que le pourcentage a changé.');
+}
+
+function renderChatgpt(c, serverTime) {
+  const age = c.last_ok ? Math.max(0, Math.floor(serverTime - c.last_ok)) : null;
+  const stale = age !== null && age > 90;
+  $('#chatgptStatus').textContent = c.error || (c.connected ? (age === null ? 'Connecté · en attente des quotas' : (stale ? 'Données anciennes · ' : '') + 'Relevé il y a ' + age + ' s') : 'Non connecté.');
+  $('#chatgptStatus').className = c.error || stale ? 'bad' : c.connected ? 'ok' : '';
+  $('#disconnectChatgpt').hidden = !c.enabled;
+  if (c.connected) $('#chatgptLogin').hidden = true;
+  const lines = [];
+  for (const bucket of c.buckets || []) {
+    for (const w of bucket.windows) {
+      const duration = w.minutes === 10080 ? 'Semaine' : w.minutes == null ? 'Fenêtre' : w.minutes % 60 === 0 ? w.minutes / 60 + ' h' : w.minutes + ' min';
+      lines.push(bucket.name + ' · ' + duration + ' : ' + Math.round(w.used) + '% utilisés' + (w.reset ? ' · Réinitialisation ' + new Date(w.reset * 1000).toLocaleString() : ''));
+    }
+  }
+  $('#chatgptLimits').textContent = lines.join(' | ') || (c.connected ? 'Aucun quota disponible.' : '');
+}
+
 function render(s) {
   state = s;
   const a = s.auth;
@@ -925,9 +998,9 @@ function render(s) {
   if (s.preview_rev !== rev) { rev = s.preview_rev; $('#preview').src = '/api/preview.png?r=' + rev; }
   $('#bezel').classList.toggle('off', !s.power);
 
-  const conn = $('#conn');
-  conn.className = a.last_error && !a.last_ok ? 'bad' : a.last_ok ? (a.status ? 'bad' : 'ok') : '';
-  conn.textContent = a.last_ok ? 'Updated ' + ago(a.last_ok) : a.last_error ? 'Not connected' : 'Waiting for data';
+  renderUsageStatus(s);
+  renderChatgpt(s.chatgpt || {}, s.server_time || Date.now()/1000);
+  $('#activeProvider').textContent = 'Écran : ' + (s.active_provider === 'chatgpt' ? 'ChatGPT' : 'Claude');
 
   document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', b.dataset.mode === a.mode));
   $('#pane-oauth').hidden = a.mode !== 'oauth';
@@ -973,7 +1046,7 @@ function render(s) {
 }
 async function load() {
   try { render(await (await fetch('/api/state')).json()); }
-  catch (e) { $('#conn').className = 'bad'; $('#conn').textContent = 'Meter offline'; }
+  catch (e) { $('#conn').className = 'bad'; $('#conn').textContent = 'Compteur injoignable'; $('#conn').title = 'Le panneau ne reçoit plus de réponse du compteur. Les valeurs affichées peuvent être anciennes.'; }
 }
 
 document.querySelectorAll('input[type=range][data-set]').forEach(el => {
@@ -1072,15 +1145,40 @@ $('#disconnectSpotify').addEventListener('click', async () => {
     $('#spotifyLogin').hidden = true; $('#spotifyResult').hidden = true; load();
   }
 });
+$('#connectChatgpt').addEventListener('click', async () => {
+  $('#connectChatgpt').disabled = true;
+  $('#chatgptResult').textContent = 'Préparation de la connexion…';
+  const j = await api('/api/chatgpt/connect', {});
+  $('#connectChatgpt').disabled = false;
+  $('#chatgptResult').textContent = j.ok ? 'Ouvre le lien et saisis le code. La connexion sera détectée automatiquement.' : j.error;
+  if (j.ok) {
+    $('#chatgptLink').href = j.verificationUrl;
+    $('#chatgptCode').textContent = j.userCode;
+    $('#chatgptLogin').hidden = false;
+  }
+});
+$('#disconnectChatgpt').addEventListener('click', async () => {
+  const j = await api('/api/chatgpt/disconnect', {});
+  if (j.ok) { $('#chatgptLogin').hidden = true; $('#chatgptCode').textContent = ''; $('#chatgptResult').textContent = ''; load(); }
+});
 load(); setInterval(load, 3000);
 </script>
 </body>
 </html>"""
 
 
-def make_app(display, st, spotify=None):
+def make_app(display, st, spotify=None, codex=None):
     app = web.Application()
     spotify = spotify or SpotifyClient(os.path.join(BASE_DIR, '.spotify-oauth.json'), WEB_PORT)
+    codex = codex or CodexMeter(os.path.join(BASE_DIR, '.meter-codex'))
+    st.codex = codex
+    async def codex_lifecycle(app):
+        task = asyncio.create_task(codex.poll())
+        yield
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await codex.close()
+    app.cleanup_ctx.append(codex_lifecycle)
     pending_oauth = {}
     oauth_retry_at = 0
     oauth_server_delay = False
@@ -1107,6 +1205,8 @@ def make_app(display, st, spotify=None):
             "session": st.session, "weekly": st.weekly, "reset": st.reset,
             "brightness": st.brightness, "orientation": st.orientation, "power": st.power,
             "alternate": st.alternate, "refresh": st.refresh,
+            "server_time": time.time(),
+            "effective_refresh": max(st.refresh, OAUTH_MIN_REFRESH) if AUTH["mode"] == "oauth" else st.refresh,
             "reset_anim": st.reset_anim, "increase_anim": st.increase_anim,
             "preview_rev": st.preview_rev,
             "spotify_visible": st.spotify_visible, "spotify_enabled": st.spotify_enabled,
@@ -1117,10 +1217,11 @@ def make_app(display, st, spotify=None):
                         "artist": (st.spotify_track or {}).get('artist', ''),
                         "is_playing": (st.spotify_track or {}).get('is_playing', False)},
             "admin_required": bool(ADMIN_TOKEN),
+            "chatgpt": codex.status(), "active_provider": st.active_provider,
             "device": {"address": display.address, "connected": display.connected},
             "auth": {
                 "mode": AUTH["mode"], "status": st.status,
-                "last_ok": st.last_ok, "last_error": st.last_error,
+                "last_ok": st.last_ok, "last_error": st.last_error, "fetching": st.fetching,
                 "oauth": oauth_status(),
                 "session": {"has_key": bool(SESSION["key"]), "has_cf": bool(SESSION["cf"]),
                             "org_name": SESSION["org_name"]},
@@ -1239,6 +1340,26 @@ def make_app(display, st, spotify=None):
         st.force_refetch = True
         return web.json_response({"ok": True})
 
+    async def api_chatgpt_connect(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        try:
+            login = await codex.connect()
+            return web.json_response({"ok": True, "verificationUrl": login['verificationUrl'], "userCode": login['userCode']}, headers={"Cache-Control":"no-store"})
+        except (CodexError, OSError, asyncio.TimeoutError, KeyError) as e:
+            return fail(str(e) if isinstance(e, CodexError) else "Connexion Codex indisponible. Vérifie l’installation de Codex CLI.", 502)
+
+    async def api_chatgpt_disconnect(request):
+        data = await request.json()
+        if denied(data):
+            return fail("wrong admin code", 403)
+        try:
+            await codex.disconnect()
+            return web.json_response({"ok": True})
+        except (CodexError, OSError, asyncio.TimeoutError):
+            return fail("Déconnexion impossible. Réessaie.", 502)
+
     async def api_scan(request):
         data = await request.json()
         if denied(data):
@@ -1299,6 +1420,8 @@ def make_app(display, st, spotify=None):
         web.get("/api/preview.png", api_preview),
         web.post("/api/set", api_set),
         web.post("/api/auth", api_auth),
+        web.post("/api/chatgpt/connect", api_chatgpt_connect),
+        web.post("/api/chatgpt/disconnect", api_chatgpt_disconnect),
         web.post("/api/oauth/start", api_oauth_start),
         web.post("/api/oauth/complete", api_oauth_complete),
         web.post("/api/scan", api_scan),
@@ -1357,6 +1480,7 @@ async def display_loop(display, st):
     next_reset_at = time.monotonic() + st.alternate
     fails, next_try = 0, 0.0
     spotify_view = SpotifyView()
+    usage_switch = UsageSwitch()
 
     while True:
         # --- fetch usage ---
@@ -1367,12 +1491,13 @@ async def display_loop(display, st):
         if (st.force_refetch or now - last_fetch >= interval) and now >= next_try:
             st.force_refetch = False
             last_fetch = now
+            st.fetching = True
             try:
                 session, weekly, reset = await asyncio.to_thread(get_usage)
                 st.session, st.weekly, st.reset = session, weekly, reset
                 st.last_ok, st.last_error = time.time(), ""
                 print(f"5H {session}% | WEEK {weekly}% | RESET {reset}")
-                if prev_session is not None and st.power and display.address:
+                if prev_session is not None and st.power and display.address and st.active_provider == "claude":
                     if st.reset_anim and prev_session >= RESET_TRIGGER_PREV and session <= RESET_TRIGGER_NOW:
                         await play_reset_animation(display)
                         last_sig = None
@@ -1382,6 +1507,7 @@ async def display_loop(display, st):
                 prev_session = session
                 fails, st.status = 0, None
             except RateLimited as e:
+                st.last_error = f"Claude limite les requêtes. Nouvelle tentative dans au moins {e.retry_after} s."
                 print(f"Rate limited, retrying in {e.retry_after}s")
                 next_try = time.monotonic() + e.retry_after
             except Exception as e:
@@ -1394,6 +1520,8 @@ async def display_loop(display, st):
                 next_try = time.monotonic() + min(300, 20 * fails)   # 20 s, 40 s… capped at 5 min
                 if fails >= 3:
                     st.status = code
+            finally:
+                st.fetching = False
 
         # --- percentage <-> reset time on the top line ---
         now = time.monotonic()
@@ -1409,16 +1537,41 @@ async def display_loop(display, st):
             top, color = st.status, RED
         else:
             top, color = (st.reset if mode == "reset" else f"{int(round(st.session))}%"), WHITE
-        sig = (top, int(round(st.session)), int(round(st.weekly)))
+        if st.last_ok:
+            usage_switch.observe('claude', (st.session, st.weekly))
+        cg = st.codex.status() if st.codex else {}
+        buckets = cg.get('buckets', [])
+        bucket = next((b for b in buckets if b['id'] == 'codex'), buckets[0] if buckets else None)
+        windows = bucket['windows'] if bucket else []
+        available = ['claude']
+        if cg.get('connected') and windows:
+            available.append('chatgpt')
+            usage_switch.observe('chatgpt', tuple((w['kind'], w['used']) for w in windows))
         spotify_frame = spotify_view.frame(st.spotify_track, now,
             st.spotify_visible and st.spotify_enabled and st.power,
             st.spotify_hold, st.spotify_speed, st.spotify_artist)
+        if spotify_frame is None or st.active_provider not in available:
+            st.active_provider = usage_switch.choose(now, available)
+        shown_session, shown_weekly = st.session, st.weekly
+        labels = ('5H', 'WEEK')
+        if st.active_provider == 'chatgpt':
+            first = next((w for w in windows if w['kind'] == 'primary'), windows[0])
+            second = next((w for w in windows if w['kind'] == 'secondary'), None)
+            shown_session = first['used']
+            shown_weekly = second['used'] if second else None
+            def window_label(w):
+                minutes = w.get('minutes') if w else None
+                return 'WEEK' if minutes == 10080 else (str(minutes//60)+'H' if minutes and minutes % 60 == 0 else str(minutes)+'M' if minutes else '--')
+            labels = (window_label(first), window_label(second))
+            top = 'ERR' if cg.get('error') else f"{int(round(shown_session))}%"
+            color = RED if cg.get('error') else WHITE
+        sig = (st.active_provider, top, shown_session, shown_weekly, labels)
         if spotify_frame is not None:
             sig = ('spotify', spotify_view.last_id, int(now * 10))
         if st.redraw:
             st.redraw, last_sig = False, None
         if sig != last_sig:
-            img = spotify_frame if spotify_frame is not None else render(st.session, st.weekly, top, color)
+            img = spotify_frame if spotify_frame is not None else render(shown_session, shown_weekly, top, color, labels, st.active_provider)
             buf = io.BytesIO()
             img.save(buf, "PNG")
             st.preview, st.preview_rev = buf.getvalue(), st.preview_rev + 1
