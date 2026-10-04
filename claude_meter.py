@@ -437,27 +437,48 @@ def percentage_color(value):
     return GRADIENT[-1][1]
 
 
-def draw_bar(draw, y, value, height=3):
+def draw_bar(draw, y, value, height=3, x_start=0, width=96):
     """Use one usage-dependent colour across the bar; dim the unfilled part."""
-    filled = round(96 * max(0, min(100, value)) / 100)
+    filled = round(width * max(0, min(100, value)) / 100)
     base = percentage_color(value)
-    for x in range(96):
-        col = base if x < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
+    for x in range(x_start, x_start + width):
+        col = base if x - x_start < filled else tuple(int(c * BAR_BG_OPACITY) for c in base)
         for yy in range(height):
             draw.point((x, y + yy), fill=col)
 
 
-def render(session, weekly, top_right, top_color=WHITE, labels=("CL 5H", "WEEK")):
+def draw_provider_logo(draw, provider):
+    """Pixel adaptations centred in a dedicated 16x16 left-hand column."""
+    if provider == 'chatgpt':
+        # Six interlocking angular loops, adapted to the LED pixel grid.
+        for i in range(6):
+            angle = i * math.pi / 3
+            points = []
+            for x, y in ((1, -2), (5, -2), (7, 1), (5, 4), (1, 4), (-1, 1), (1, -2)):
+                points.append((round(7.5 + x * math.cos(angle) - y * math.sin(angle)),
+                               round(7.5 + x * math.sin(angle) + y * math.cos(angle))))
+            draw.line(points, fill=(235, 245, 240), width=1)
+    else:
+        # Claude's orange radial mark.
+        for i in range(12):
+            angle = i * math.pi / 6
+            radius = 6 if i % 2 == 0 else 5
+            draw.line((8, 8, round(8 + radius * math.cos(angle)),
+                       round(8 + radius * math.sin(angle))), fill=(222, 133, 101), width=1)
+
+
+def render(session, weekly, top_right, top_color=WHITE, labels=("5H", "WEEK"), provider='claude'):
     img = Image.new("RGB", (96, 16), BLACK)
     d = ImageDraw.Draw(img)
-    draw_text(d, labels[0], 1, 0, WHITE)
+    draw_provider_logo(d, provider)
+    draw_text(d, labels[0], 19, 0, WHITE)
     draw_text_right(d, top_right, 95, 0, top_color)
     if session is not None:
-        draw_bar(d, 5, session)
-    draw_text(d, labels[1], 1, 8, WHITE)
+        draw_bar(d, 5, session, x_start=18, width=78)
+    draw_text(d, labels[1], 19, 8, WHITE)
     draw_text_right(d, f"{int(round(weekly))}%" if weekly is not None else "--", 95, 8, WHITE)
     if weekly is not None:
-        draw_bar(d, 13, weekly)
+        draw_bar(d, 13, weekly, x_start=18, width=78)
     return img
 
 
@@ -733,7 +754,7 @@ HTML_PAGE = r"""<!doctype html>
       <button id="disconnectChatgpt" hidden>Déconnecter ChatGPT</button></p>
     <p id="chatgptLogin" hidden><a id="chatgptLink" target="_blank" rel="noopener noreferrer">Ouvrir la connexion OpenAI</a> · Code : <strong id="chatgptCode"></strong></p>
     <p id="chatgptResult" class="note" role="status"></p>
-    <p class="note">L’écran bascule vers le service dont la consommation change, au prochain relevé. Si les deux changent, chacun reste visible au moins 8 secondes. Repères LED : CL = Claude, GPT = ChatGPT.</p>
+    <p class="note">L’écran bascule vers le service dont la consommation change, au prochain relevé. Si les deux changent, chacun reste visible au moins 8 secondes. Le logo à gauche identifie Claude ou Codex.</p>
     <p class="note" id="activeProvider"></p>
   </section>
 
@@ -1533,7 +1554,7 @@ async def display_loop(display, st):
         if spotify_frame is None or st.active_provider not in available:
             st.active_provider = usage_switch.choose(now, available)
         shown_session, shown_weekly = st.session, st.weekly
-        labels = ('CL 5H', 'WEEK')
+        labels = ('5H', 'WEEK')
         if st.active_provider == 'chatgpt':
             first = next((w for w in windows if w['kind'] == 'primary'), windows[0])
             second = next((w for w in windows if w['kind'] == 'secondary'), None)
@@ -1542,7 +1563,7 @@ async def display_loop(display, st):
             def window_label(w):
                 minutes = w.get('minutes') if w else None
                 return 'WEEK' if minutes == 10080 else (str(minutes//60)+'H' if minutes and minutes % 60 == 0 else str(minutes)+'M' if minutes else '--')
-            labels = ('GPT '+window_label(first), window_label(second))
+            labels = (window_label(first), window_label(second))
             top = 'ERR' if cg.get('error') else f"{int(round(shown_session))}%"
             color = RED if cg.get('error') else WHITE
         sig = (st.active_provider, top, shown_session, shown_weekly, labels)
@@ -1551,7 +1572,7 @@ async def display_loop(display, st):
         if st.redraw:
             st.redraw, last_sig = False, None
         if sig != last_sig:
-            img = spotify_frame if spotify_frame is not None else render(shown_session, shown_weekly, top, color, labels)
+            img = spotify_frame if spotify_frame is not None else render(shown_session, shown_weekly, top, color, labels, st.active_provider)
             buf = io.BytesIO()
             img.save(buf, "PNG")
             st.preview, st.preview_rev = buf.getvalue(), st.preview_rev + 1
