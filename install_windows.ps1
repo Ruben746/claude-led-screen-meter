@@ -23,7 +23,7 @@ $sourceDir = $PSScriptRoot
 $installDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'LED Meter'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
-foreach ($name in @('claude_meter.py', 'spotify_meter.py', 'windows_runner.py', 'requirements.txt', '.env.example', 'Lancer.bat', 'Installer-Windows.bat', 'install_windows.ps1')) {
+foreach ($name in @('claude_meter.py', 'codex_meter.py', 'spotify_meter.py', 'windows_runner.py', 'requirements.txt', '.env.example', 'Lancer.bat', 'Installer-Windows.bat', 'install_windows.ps1')) {
     $sourceFile = Join-Path $sourceDir $name
     $targetFile = Join-Path $installDir $name
     if ([IO.Path]::GetFullPath($sourceFile) -ne [IO.Path]::GetFullPath($targetFile)) {

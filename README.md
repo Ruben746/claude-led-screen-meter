@@ -31,6 +31,14 @@ L'écran choisi et tous les réglages sont enregistrés dans `.env`, y compris l
 
 Le panneau est organisé en trois onglets : **Compteur** (quotas et compte Claude), **Spotify** et **Paramètres** (écran, animations et visibilité de Spotify). L'aperçu LED reste visible dans les trois onglets. Les messages locaux, les pages d'envoi à distance et les relais externes ne sont pas inclus.
 
+### ChatGPT et bascule automatique
+
+Installe [Codex CLI](https://developers.openai.com/codex/cli) sur la machine qui exécute le compteur (`npm install -g @openai/codex`). Dans **Compteur**, clique sur **Connecter ChatGPT**, ouvre le lien OpenAI et saisis le code affiché. Si nécessaire, active la connexion par code d’appareil dans les paramètres de sécurité de ChatGPT.
+
+Le compteur utilise l’interface officielle `codex app-server` pour lire les quotas du compte, sans lancer de conversation ni consommer de crédits. Il affiche les fenêtres et limites fournies par OpenAI, avec le pourcentage **utilisé**. Une limite absente reste indisponible. Les identifiants sont isolés dans `.meter-codex/` (exclu de Git) et renouvelés par Codex ; la connexion de l’app Codex existante reste indépendante. Déconnecter ChatGPT dans le panneau déconnecte uniquement ce compteur.
+
+Les quotas ChatGPT sont vérifiés chaque minute. Dès qu’un pourcentage Claude ou ChatGPT change, même lors d’une remise à zéro, l’écran passe au service concerné. Si les deux changent ensemble, chacun reste visible au moins 8 secondes ; ensuite, le dernier service reste affiché jusqu’au changement suivant. Le premier relevé sert de référence. Les repères LED sont **CL** et **GPT**. Spotify garde sa priorité temporaire, puis l’écran revient au compteur sélectionné. Le panneau conserve les deux relevés et leurs états. Pour plusieurs limites OpenAI, le panneau les affiche toutes ; la LED affiche la limite `codex` lorsqu’elle existe, sinon la première limite disponible.
+
 ### Spotify (facultatif)
 
 Dans **Spotify**, connecte ton compte pour afficher la pochette, le titre et éventuellement l'artiste à chaque nouveau morceau. Après la durée choisie (10 secondes par défaut), l'écran revient aux quotas. La durée, la vitesse et l'affichage de l'artiste sont sauvegardés. Les couleurs unies des barres Claude restent inchangées.
@@ -154,6 +162,12 @@ The selected display and every setting are saved to `.env`, including power. The
 Bluetooth connection detection uses the private `AsyncClient._session.is_connected` property because pypixelcolor 0.5.0 can retain a stale client connection flag after a remote disconnect. Recheck this integration when upgrading the dependency.
 
 The panel has three tabs: **Compteur** (meter and Claude account), **Spotify**, and **Paramètres** (settings, display and Spotify visibility). The LED preview remains visible in all tabs. Local messages, remote message pages and relay polling are not included.
+
+### ChatGPT and automatic display switching
+
+Install [Codex CLI](https://developers.openai.com/codex/cli) on the meter host (`npm install -g @openai/codex`). In Compteur, click **Connecter ChatGPT**, open the OpenAI link and enter the device code. Enable device-code login in ChatGPT security settings if required. The official app-server reads account limits without starting model conversations. Credentials live separately in the Git-ignored `.meter-codex/` and are refreshed by Codex. Disconnecting the meter does not log out other Codex installations.
+
+Polling runs every minute. A usage change (including resets) selects the corresponding provider on the LED. Simultaneous changes are queued, with at least eight seconds per provider. Initial readings establish the baseline; unchanged polls do not switch the display. CL identifies Claude and GPT identifies ChatGPT. Spotify temporarily takes priority. The panel shows all returned buckets; the LED uses `codex`, or the first available bucket. Missing windows are displayed as unavailable, never zero.
 
 ### Optional Spotify display
 

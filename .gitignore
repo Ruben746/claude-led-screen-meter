@@ -8,3 +8,5 @@ __pycache__/
 *.png
 meter.log
 meter.log.old
+
+.meter-codex/
