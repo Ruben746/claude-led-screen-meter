@@ -30,6 +30,15 @@ foreach ($name in @('claude_meter.py', 'codex_meter.py', 'spotify_meter.py', 'wi
         Copy-Item -LiteralPath $sourceFile -Destination $targetFile -Force
     }
 }
+$assetsDir = Join-Path $installDir 'assets'
+New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
+foreach ($name in @('claude-desktop.png', 'codex-desktop.png', 'SOURCES.md')) {
+    $sourceAsset = Join-Path (Join-Path $sourceDir 'assets') $name
+    $targetAsset = Join-Path $assetsDir $name
+    if ([IO.Path]::GetFullPath($sourceAsset) -ne [IO.Path]::GetFullPath($targetAsset)) {
+        Copy-Item -LiteralPath $sourceAsset -Destination $targetAsset -Force
+    }
+}
 $config = Join-Path $installDir '.env'
 if (-not (Test-Path -LiteralPath $config)) {
     # New install uses its own credentials. Existing installed settings are preserved.

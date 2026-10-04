@@ -12,7 +12,7 @@ import secrets
 import threading
 import math
 from email.utils import parsedate_to_datetime
-from functools import wraps
+from functools import wraps, lru_cache
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -447,30 +447,25 @@ def draw_bar(draw, y, value, height=3, x_start=0, width=96):
             draw.point((x, y + yy), fill=col)
 
 
-def draw_provider_logo(draw, provider):
-    """Pixel adaptations centred in a dedicated 16x16 left-hand column."""
-    if provider == 'chatgpt':
-        # Six interlocking angular loops, adapted to the LED pixel grid.
-        for i in range(6):
-            angle = i * math.pi / 3
-            points = []
-            for x, y in ((1, -2), (5, -2), (7, 1), (5, 4), (1, 4), (-1, 1), (1, -2)):
-                points.append((round(7.5 + x * math.cos(angle) - y * math.sin(angle)),
-                               round(7.5 + x * math.sin(angle) + y * math.cos(angle))))
-            draw.line(points, fill=(235, 245, 240), width=1)
-    else:
-        # Claude's orange radial mark.
-        for i in range(12):
-            angle = i * math.pi / 6
-            radius = 6 if i % 2 == 0 else 5
-            draw.line((8, 8, round(8 + radius * math.cos(angle)),
-                       round(8 + radius * math.sin(angle))), fill=(222, 133, 101), width=1)
+@lru_cache(maxsize=2)
+def provider_logo(provider):
+    """Rasterize the original brand asset; never reconstruct its geometry."""
+    name = 'codex-desktop.png' if provider == 'chatgpt' else 'claude-desktop.png'
+    with Image.open(os.path.join(BASE_DIR, 'assets', name)) as source:
+        logo = source.convert('RGBA')
+    # Remove transparent export padding only, preserving the complete mark.
+    bounds = logo.getchannel('A').getbbox()
+    if bounds:
+        logo = logo.crop(bounds)
+    logo.thumbnail((16, 16), Image.Resampling.LANCZOS)
+    return logo
 
 
 def render(session, weekly, top_right, top_color=WHITE, labels=("5H", "WEEK"), provider='claude'):
     img = Image.new("RGB", (96, 16), BLACK)
     d = ImageDraw.Draw(img)
-    draw_provider_logo(d, provider)
+    logo = provider_logo(provider)
+    img.paste(logo, ((16-logo.width)//2, (16-logo.height)//2), logo)
     draw_text(d, labels[0], 19, 0, WHITE)
     draw_text_right(d, top_right, 95, 0, top_color)
     if session is not None:
