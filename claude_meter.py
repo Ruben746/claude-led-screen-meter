@@ -466,7 +466,11 @@ def render(session, weekly, top_right, top_color=WHITE, labels=("5H", "WEEK"), p
     d = ImageDraw.Draw(img)
     logo = provider_logo(provider)
     img.paste(logo, ((16-logo.width)//2, (16-logo.height)//2), logo)
-    draw_text(d, labels[0], 19, 0, WHITE)
+    if labels[0] == "5H":
+        draw_text(d, "5", 19, 0, WHITE)
+        draw_text(d, "H", 24, 0, WHITE)
+    else:
+        draw_text(d, labels[0], 19, 0, WHITE)
     draw_text_right(d, top_right, 95, 0, top_color)
     if session is not None:
         draw_bar(d, 5, session, x_start=18, width=78)
